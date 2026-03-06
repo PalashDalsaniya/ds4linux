@@ -1,0 +1,34 @@
+{
+    "name": "Default",
+    "output_mode": 0,
+    "lightbar_color": {
+        "r": 0,
+        "g": 0,
+        "b": 255
+    },
+    "rumble_strength": 1.0,
+    "left_stick_dz": {
+        "type": 1,
+        "inner": 0.05,
+        "outer": 1.0
+    },
+    "right_stick_dz": {
+        "type": 1,
+        "inner": 0.05,
+        "outer": 1.0
+    },
+    "left_trigger_dz": {
+        "type": 0,
+        "inner": 0.0,
+        "outer": 1.0
+    },
+    "right_trigger_dz": {
+        "type": 0,
+        "inner": 0.0,
+        "outer": 1.0
+    },
+    "touchpad_as_mouse": false,
+    "touchpad_sensitivity": 1.0,
+    "button_map": {},
+    "axis_map": {}
+}
