@@ -88,7 +88,7 @@ static const std::uint8_t kDS4HidReportDescriptor[] = {
     0x75, 0x06,        //   Report Size (6)
     0x95, 0x01,        //   Report Count (1)
     0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x7F,        //   Logical Maximum (127)
+    0x25, 0x3F,        //   Logical Maximum (63)
     0x81, 0x02,        //   Input (Data,Var,Abs)        [6 bits]
     //                     subtotal: 4 + 3 = 7 bytes
 

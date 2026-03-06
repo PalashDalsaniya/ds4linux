@@ -15,6 +15,7 @@
 #include <linux/input.h>
 #include <stdexcept>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
 
@@ -174,6 +175,9 @@ int InputDevice::open_hidraw() const {
         auto vid = static_cast<std::uint16_t>(info.vendor);
         auto pid = static_cast<std::uint16_t>(info.product);
         if (deduce_model(vid, pid) == impl_->model_) {
+            ::fchmod(hfd, 0600);
+            std::cout << "[ds4linux] Locked " << entry.path()
+                      << " permissions to 0600 (root-only)\n";
             return hfd; // caller owns this fd
         }
         ::close(hfd);
