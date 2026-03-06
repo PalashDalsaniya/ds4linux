@@ -76,6 +76,10 @@ InputDevice::InputDevice(const std::string& evdev_path, bool grab_exclusive)
                                 "Failed to open " + evdev_path);
     }
 
+    ::fchmod(impl_->fd, 0600);
+    std::cout << "[ds4linux] Locked " << evdev_path
+              << " permissions to 0600 (root-only)\n";
+
     int rc = libevdev_new_from_fd(impl_->fd, &impl_->dev);
     if (rc < 0) {
         ::close(impl_->fd);
