@@ -661,10 +661,11 @@ RumbleOutput VirtualDevice::process_output() {
             }
             case 0x81: {
                 // MAC address (7 bytes: ID + 6 MAC octets)
+                // Sony OUI 00:17:C8 — passes winebus.sys vendor check
                 std::uint8_t mac[7]{};
                 mac[0] = 0x81;
-                mac[1] = 0x00; mac[2] = 0x11; mac[3] = 0x22;
-                mac[4] = 0x33; mac[5] = 0x44; mac[6] = 0x55;
+                mac[1] = 0x00; mac[2] = 0x17; mac[3] = 0xC8;
+                mac[4] = 0x2A; mac[5] = 0x8B; mac[6] = 0x44;
                 reply.u.get_report_reply.size = sizeof(mac);
                 std::memcpy(reply.u.get_report_reply.data, mac, sizeof(mac));
                 break;
@@ -675,9 +676,9 @@ RumbleOutput VirtualDevice::process_output() {
                 info[0] = 0xA3;
                 // Byte 1-2: HW version (faked)
                 info[1] = 0x00; info[2] = 0x01;
-                // Bytes 4-9: device MAC (same as 0x81)
-                info[4] = 0x00; info[5] = 0x11; info[6] = 0x22;
-                info[7] = 0x33; info[8] = 0x44; info[9] = 0x55;
+                // Bytes 4-9: device MAC (same as 0x81, Sony OUI)
+                info[4] = 0x00; info[5] = 0x17; info[6] = 0xC8;
+                info[7] = 0x2A; info[8] = 0x8B; info[9] = 0x44;
                 reply.u.get_report_reply.size = sizeof(info);
                 std::memcpy(reply.u.get_report_reply.data, info, sizeof(info));
                 break;
