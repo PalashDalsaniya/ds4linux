@@ -162,11 +162,14 @@ void DeviceManager::scan() {
             char name_buf[256] = {};
             ::ioctl(fd, EVIOCGNAME(sizeof(name_buf)), name_buf);
 
-            // Skip our own virtual devices (they share the same VID/PID)
-            std::string dev_name(name_buf);
-            if (dev_name.rfind("DS4Linux Virtual", 0) == 0) {
-                ::close(fd);
-                continue;
+            // Skip our own virtual devices using the custom phys string
+            char phys_buf[256] = {};
+            if (::ioctl(fd, EVIOCGPHYS(sizeof(phys_buf)), phys_buf) >= 0) {
+                std::string dev_phys(phys_buf);
+                if (dev_phys == "ds4linux/virtual") {
+                    ::close(fd);
+                    continue;
+                }
             }
 
             NodeInfo::Type type = NodeInfo::Other;

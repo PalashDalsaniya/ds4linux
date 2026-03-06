@@ -478,12 +478,15 @@ VirtualDevice::VirtualDevice()
 
     auto& cr = ev.u.create2;
     std::strncpy(reinterpret_cast<char*>(cr.name),
-                 std::string(kVirtualDS4Name).c_str(),
+                 "Wireless Controller",
                  sizeof(cr.name) - 1);
+    std::strncpy(reinterpret_cast<char*>(cr.phys),
+                 "ds4linux/virtual",
+                 sizeof(cr.phys) - 1);
 
     cr.bus     = BUS_USB;
     cr.vendor  = kVidSony;
-    cr.product = kPidDS4v1;     // DS4 v1
+    cr.product = kPidDS4v2;     // DS4 v2 — broader native PC support
     cr.version = 0x0100;
     cr.country = 0;
 
@@ -503,7 +506,7 @@ VirtualDevice::VirtualDevice()
     }
 
     std::cout << "[ds4linux] Virtual DS4 gamepad created via UHID "
-              << "(VID=054C PID=05C4)\n";
+              << "(VID=054C PID=09CC)\n";
 }
 
 VirtualDevice::~VirtualDevice() = default;
