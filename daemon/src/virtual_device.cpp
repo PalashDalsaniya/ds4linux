@@ -9,15 +9,19 @@
 #include "ds4linux/virtual_device.h"
 #include "ds4linux/constants.h"
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
 #include <linux/input.h>
+#include <poll.h>
 #include <linux/uhid.h>
 #include <linux/uinput.h>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <unistd.h>
 
 namespace ds4linux::daemon {
@@ -41,344 +45,40 @@ namespace ds4linux::daemon {
 
 // clang-format off
 static const std::uint8_t kDS4HidReportDescriptor[] = {
-    0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
-    0x09, 0x05,        // Usage (Game Pad)
-    0xA1, 0x01,        // Collection (Application)
-
-    // ── Input Report 0x01 (64 bytes: 1 ID + 63 data) ────────────────────────
-
-    0x85, 0x01,        //   Report ID (1)
-
-    // 4 stick axes: X (LX), Y (LY), Z (RX), Rz (RY), each 0–255
-    0x09, 0x30,        //   Usage (X)
-    0x09, 0x31,        //   Usage (Y)
-    0x09, 0x32,        //   Usage (Z)
-    0x09, 0x35,        //   Usage (Rz)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x26, 0xFF, 0x00,  //   Logical Maximum (255)
-    0x75, 0x08,        //   Report Size (8)
-    0x95, 0x04,        //   Report Count (4)
-    0x81, 0x02,        //   Input (Data,Var,Abs)        [4 bytes]
-
-    // Hat switch (D-pad), 4 bits, 0–7 directional + null
-    0x09, 0x39,        //   Usage (Hat switch)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x07,        //   Logical Maximum (7)
-    0x35, 0x00,        //   Physical Minimum (0)
-    0x46, 0x3B, 0x01,  //   Physical Maximum (315)
-    0x65, 0x14,        //   Unit (Eng Rot: Degree)
-    0x75, 0x04,        //   Report Size (4)
-    0x95, 0x01,        //   Report Count (1)
-    0x81, 0x42,        //   Input (Data,Var,Abs,Null)   [4 bits]
-
-    // 14 buttons (Sq, Cr, Ci, Tr, L1, R1, L2, R2, Share, Opt, L3, R3, PS, TP)
-    0x65, 0x00,        //   Unit (None)
-    0x05, 0x09,        //   Usage Page (Button)
-    0x19, 0x01,        //   Usage Minimum (0x01)
-    0x29, 0x0E,        //   Usage Maximum (0x0E)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x01,        //   Logical Maximum (1)
-    0x75, 0x01,        //   Report Size (1)
-    0x95, 0x0E,        //   Report Count (14)
-    0x81, 0x02,        //   Input (Data,Var,Abs)        [14 bits]
-
-    // 6-bit vendor counter (pads bytes 5–7 to 3 full bytes)
-    0x06, 0x00, 0xFF,  //   Usage Page (Vendor Defined 0xFF00)
-    0x09, 0x20,        //   Usage (0x20)
-    0x75, 0x06,        //   Report Size (6)
-    0x95, 0x01,        //   Report Count (1)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x3F,        //   Logical Maximum (63)
-    0x81, 0x02,        //   Input (Data,Var,Abs)        [6 bits]
-    //                     subtotal: 4 + 3 = 7 bytes
-
-    // Triggers: Rx = L2, Ry = R2 (0–255)
-    0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
-    0x09, 0x33,        //   Usage (Rx)
-    0x09, 0x34,        //   Usage (Ry)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x26, 0xFF, 0x00,  //   Logical Maximum (255)
-    0x75, 0x08,        //   Report Size (8)
-    0x95, 0x02,        //   Report Count (2)
-    0x81, 0x02,        //   Input (Data,Var,Abs)        [2 bytes → 9 total]
-
-    // Remaining 54 bytes: vendor-specific (timestamp, IMU, touch, battery)
-    0x06, 0x00, 0xFF,  //   Usage Page (Vendor Defined 0xFF00)
-    0x09, 0x21,        //   Usage (0x21)
-    0x95, 0x36,        //   Report Count (54)
-    0x81, 0x02,        //   Input (Data,Var,Abs)        [54 bytes → 63 total]
-
-    // ── Output Report 0x05 (32 bytes: 1 ID + 31 data) ───────────────────────
-
-    0x85, 0x05,        //   Report ID (5)
-    0x09, 0x22,        //   Usage (0x22)
-    0x95, 0x1F,        //   Report Count (31)
-    0x91, 0x02,        //   Output (Data,Var,Abs)
-
-    // ── Feature Reports ──────────────────────────────────────────────────────
-
-    // 0x02 — calibration data (37 bytes)
-    0x85, 0x02,        //   Report ID (2)
-    0x09, 0x24,        //   Usage (0x24)
-    0x95, 0x24,        //   Report Count (36)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x04 (37 bytes)
-    0x85, 0x04,        //   Report ID (4)
-    0x09, 0x23,        //   Usage (0x23)
-    0x95, 0x24,        //   Report Count (36)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x08 (4 bytes)
-    0x85, 0x08,        //   Report ID (8)
-    0x09, 0x25,        //   Usage (0x25)
-    0x95, 0x03,        //   Report Count (3)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x10 (5 bytes)
-    0x85, 0x10,        //   Report ID (16)
-    0x09, 0x26,        //   Usage (0x26)
-    0x95, 0x04,        //   Report Count (4)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x11 (3 bytes)
-    0x85, 0x11,        //   Report ID (17)
-    0x09, 0x27,        //   Usage (0x27)
-    0x95, 0x02,        //   Report Count (2)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x12 (16 bytes)
-    0x85, 0x12,        //   Report ID (18)
-    0x06, 0x02, 0xFF,  //   Usage Page (Vendor Defined 0xFF02)
-    0x09, 0x21,        //   Usage (0x21)
-    0x95, 0x0F,        //   Report Count (15)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x13 (23 bytes)
-    0x85, 0x13,        //   Report ID (19)
-    0x09, 0x22,        //   Usage (0x22)
-    0x95, 0x16,        //   Report Count (22)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x14 (17 bytes)
-    0x85, 0x14,        //   Report ID (20)
-    0x06, 0x05, 0xFF,  //   Usage Page (Vendor Defined 0xFF05)
-    0x09, 0x20,        //   Usage (0x20)
-    0x95, 0x10,        //   Report Count (16)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x15 (45 bytes)
-    0x85, 0x15,        //   Report ID (21)
-    0x09, 0x21,        //   Usage (0x21)
-    0x95, 0x2C,        //   Report Count (44)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x80 (7 bytes)
-    0x85, 0x80,        //   Report ID (128)
-    0x06, 0x80, 0xFF,  //   Usage Page (Vendor Defined 0xFF80)
-    0x09, 0x20,        //   Usage (0x20)
-    0x95, 0x06,        //   Report Count (6)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x81 (7 bytes)
-    0x85, 0x81,        //   Report ID (129)
-    0x09, 0x21,        //   Usage (0x21)
-    0x95, 0x06,        //   Report Count (6)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x82 (6 bytes)
-    0x85, 0x82,        //   Report ID (130)
-    0x09, 0x22,        //   Usage (0x22)
-    0x95, 0x05,        //   Report Count (5)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x83 (2 bytes)
-    0x85, 0x83,        //   Report ID (131)
-    0x09, 0x23,        //   Usage (0x23)
-    0x95, 0x01,        //   Report Count (1)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x84 (5 bytes)
-    0x85, 0x84,        //   Report ID (132)
-    0x09, 0x24,        //   Usage (0x24)
-    0x95, 0x04,        //   Report Count (4)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x85 (7 bytes)
-    0x85, 0x85,        //   Report ID (133)
-    0x09, 0x25,        //   Usage (0x25)
-    0x95, 0x06,        //   Report Count (6)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x86 (7 bytes)
-    0x85, 0x86,        //   Report ID (134)
-    0x09, 0x26,        //   Usage (0x26)
-    0x95, 0x06,        //   Report Count (6)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x87 (36 bytes)
-    0x85, 0x87,        //   Report ID (135)
-    0x09, 0x27,        //   Usage (0x27)
-    0x95, 0x23,        //   Report Count (35)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x88 (35 bytes)
-    0x85, 0x88,        //   Report ID (136)
-    0x09, 0x28,        //   Usage (0x28)
-    0x95, 0x22,        //   Report Count (34)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x89 (3 bytes)
-    0x85, 0x89,        //   Report ID (137)
-    0x09, 0x29,        //   Usage (0x29)
-    0x95, 0x02,        //   Report Count (2)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x90 (6 bytes)
-    0x85, 0x90,        //   Report ID (144)
-    0x09, 0x30,        //   Usage (0x30)
-    0x95, 0x05,        //   Report Count (5)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x91 (4 bytes)
-    0x85, 0x91,        //   Report ID (145)
-    0x09, 0x31,        //   Usage (0x31)
-    0x95, 0x03,        //   Report Count (3)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x92 (4 bytes)
-    0x85, 0x92,        //   Report ID (146)
-    0x09, 0x32,        //   Usage (0x32)
-    0x95, 0x03,        //   Report Count (3)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0x93 (13 bytes)
-    0x85, 0x93,        //   Report ID (147)
-    0x09, 0x33,        //   Usage (0x33)
-    0x95, 0x0C,        //   Report Count (12)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA0 (7 bytes)
-    0x85, 0xA0,        //   Report ID (160)
-    0x09, 0x40,        //   Usage (0x40)
-    0x95, 0x06,        //   Report Count (6)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA1 (2 bytes)
-    0x85, 0xA1,        //   Report ID (161)
-    0x09, 0x41,        //   Usage (0x41)
-    0x95, 0x01,        //   Report Count (1)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA2 (2 bytes)
-    0x85, 0xA2,        //   Report ID (162)
-    0x09, 0x42,        //   Usage (0x42)
-    0x95, 0x01,        //   Report Count (1)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA3 (49 bytes — MAC address / serial)
-    0x85, 0xA3,        //   Report ID (163)
-    0x09, 0x43,        //   Usage (0x43)
-    0x95, 0x30,        //   Report Count (48)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA4 (14 bytes)
-    0x85, 0xA4,        //   Report ID (164)
-    0x09, 0x44,        //   Usage (0x44)
-    0x95, 0x0D,        //   Report Count (13)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA5 (22 bytes)
-    0x85, 0xA5,        //   Report ID (165)
-    0x09, 0x45,        //   Usage (0x45)
-    0x95, 0x15,        //   Report Count (21)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA6 (22 bytes)
-    0x85, 0xA6,        //   Report ID (166)
-    0x09, 0x46,        //   Usage (0x46)
-    0x95, 0x15,        //   Report Count (21)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xF0 (64 bytes)
-    0x85, 0xF0,        //   Report ID (240)
-    0x09, 0x47,        //   Usage (0x47)
-    0x95, 0x3F,        //   Report Count (63)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xF1 (64 bytes)
-    0x85, 0xF1,        //   Report ID (241)
-    0x09, 0x48,        //   Usage (0x48)
-    0x95, 0x3F,        //   Report Count (63)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xF2 (16 bytes)
-    0x85, 0xF2,        //   Report ID (242)
-    0x09, 0x49,        //   Usage (0x49)
-    0x95, 0x0F,        //   Report Count (15)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA7 (2 bytes)
-    0x85, 0xA7,        //   Report ID (167)
-    0x09, 0x4A,        //   Usage (0x4A)
-    0x95, 0x01,        //   Report Count (1)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA8 (2 bytes)
-    0x85, 0xA8,        //   Report ID (168)
-    0x09, 0x4B,        //   Usage (0x4B)
-    0x95, 0x01,        //   Report Count (1)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xA9 (9 bytes)
-    0x85, 0xA9,        //   Report ID (169)
-    0x09, 0x4C,        //   Usage (0x4C)
-    0x95, 0x08,        //   Report Count (8)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xAA (2 bytes)
-    0x85, 0xAA,        //   Report ID (170)
-    0x09, 0x4E,        //   Usage (0x4E)
-    0x95, 0x01,        //   Report Count (1)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xAB (58 bytes)
-    0x85, 0xAB,        //   Report ID (171)
-    0x09, 0x4F,        //   Usage (0x4F)
-    0x95, 0x39,        //   Report Count (57)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xAC (58 bytes)
-    0x85, 0xAC,        //   Report ID (172)
-    0x09, 0x50,        //   Usage (0x50)
-    0x95, 0x39,        //   Report Count (57)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xAD (12 bytes)
-    0x85, 0xAD,        //   Report ID (173)
-    0x09, 0x51,        //   Usage (0x51)
-    0x95, 0x0B,        //   Report Count (11)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xAE (2 bytes)
-    0x85, 0xAE,        //   Report ID (174)
-    0x09, 0x52,        //   Usage (0x52)
-    0x95, 0x01,        //   Report Count (1)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xAF (3 bytes)
-    0x85, 0xAF,        //   Report ID (175)
-    0x09, 0x53,        //   Usage (0x53)
-    0x95, 0x02,        //   Report Count (2)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    // 0xB0 (64 bytes)
-    0x85, 0xB0,        //   Report ID (176)
-    0x09, 0x54,        //   Usage (0x54)
-    0x95, 0x3F,        //   Report Count (63)
-    0xB1, 0x02,        //   Feature (Data,Var,Abs)
-
-    0xC0,              // End Collection
+    // Exact 1:1 hex dump from physical DualShock 4 v1 (CUH-ZCT1x).
+    // Byte 78 (Logical Maximum for 6-bit counter) kept as 0x3F to avoid
+    // Windows hidparse.sys rejecting Sony's native firmware bug.
+    0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x09, 0x35,
+    0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x04, 0x81, 0x02, 0x09, 0x39, 0x15, 0x00, 0x25,
+    0x07, 0x35, 0x00, 0x46, 0x3B, 0x01, 0x65, 0x14, 0x75, 0x04, 0x95, 0x01, 0x81, 0x42, 0x65, 0x00,
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x0E, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x0E, 0x81, 0x02,
+    0x06, 0x00, 0xFF, 0x09, 0x20, 0x75, 0x06, 0x95, 0x01, 0x15, 0x00, 0x25, 0x3F, 0x81, 0x02, 0x05,
+    0x01, 0x09, 0x33, 0x09, 0x34, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x02, 0x81, 0x02,
+    0x06, 0x00, 0xFF, 0x09, 0x21, 0x95, 0x36, 0x81, 0x02, 0x85, 0x05, 0x09, 0x22, 0x95, 0x1F, 0x91,
+    0x02, 0x85, 0x04, 0x09, 0x23, 0x95, 0x24, 0xB1, 0x02, 0x85, 0x02, 0x09, 0x24, 0x95, 0x24, 0xB1,
+    0x02, 0x85, 0x08, 0x09, 0x25, 0x95, 0x03, 0xB1, 0x02, 0x85, 0x10, 0x09, 0x26, 0x95, 0x04, 0xB1,
+    0x02, 0x85, 0x11, 0x09, 0x27, 0x95, 0x02, 0xB1, 0x02, 0x85, 0x12, 0x06, 0x02, 0xFF, 0x09, 0x21,
+    0x95, 0x0F, 0xB1, 0x02, 0x85, 0x13, 0x09, 0x22, 0x95, 0x16, 0xB1, 0x02, 0x85, 0x14, 0x06, 0x05,
+    0xFF, 0x09, 0x20, 0x95, 0x10, 0xB1, 0x02, 0x85, 0x15, 0x09, 0x21, 0x95, 0x2C, 0xB1, 0x02, 0x06,
+    0x80, 0xFF, 0x85, 0x80, 0x09, 0x20, 0x95, 0x06, 0xB1, 0x02, 0x85, 0x81, 0x09, 0x21, 0x95, 0x06,
+    0xB1, 0x02, 0x85, 0x82, 0x09, 0x22, 0x95, 0x05, 0xB1, 0x02, 0x85, 0x83, 0x09, 0x23, 0x95, 0x01,
+    0xB1, 0x02, 0x85, 0x84, 0x09, 0x24, 0x95, 0x04, 0xB1, 0x02, 0x85, 0x85, 0x09, 0x25, 0x95, 0x06,
+    0xB1, 0x02, 0x85, 0x86, 0x09, 0x26, 0x95, 0x06, 0xB1, 0x02, 0x85, 0x87, 0x09, 0x27, 0x95, 0x23,
+    0xB1, 0x02, 0x85, 0x88, 0x09, 0x28, 0x95, 0x22, 0xB1, 0x02, 0x85, 0x89, 0x09, 0x29, 0x95, 0x02,
+    0xB1, 0x02, 0x85, 0x90, 0x09, 0x30, 0x95, 0x05, 0xB1, 0x02, 0x85, 0x91, 0x09, 0x31, 0x95, 0x03,
+    0xB1, 0x02, 0x85, 0x92, 0x09, 0x32, 0x95, 0x03, 0xB1, 0x02, 0x85, 0x93, 0x09, 0x33, 0x95, 0x0C,
+    0xB1, 0x02, 0x85, 0xA0, 0x09, 0x40, 0x95, 0x06, 0xB1, 0x02, 0x85, 0xA1, 0x09, 0x41, 0x95, 0x01,
+    0xB1, 0x02, 0x85, 0xA2, 0x09, 0x42, 0x95, 0x01, 0xB1, 0x02, 0x85, 0xA3, 0x09, 0x43, 0x95, 0x30,
+    0xB1, 0x02, 0x85, 0xA4, 0x09, 0x44, 0x95, 0x0D, 0xB1, 0x02, 0x85, 0xA5, 0x09, 0x45, 0x95, 0x15,
+    0xB1, 0x02, 0x85, 0xA6, 0x09, 0x46, 0x95, 0x15, 0xB1, 0x02, 0x85, 0xF0, 0x09, 0x47, 0x95, 0x3F,
+    0xB1, 0x02, 0x85, 0xF1, 0x09, 0x48, 0x95, 0x3F, 0xB1, 0x02, 0x85, 0xF2, 0x09, 0x49, 0x95, 0x0F,
+    0xB1, 0x02, 0x85, 0xA7, 0x09, 0x4A, 0x95, 0x01, 0xB1, 0x02, 0x85, 0xA8, 0x09, 0x4B, 0x95, 0x01,
+    0xB1, 0x02, 0x85, 0xA9, 0x09, 0x4C, 0x95, 0x08, 0xB1, 0x02, 0x85, 0xAA, 0x09, 0x4E, 0x95, 0x01,
+    0xB1, 0x02, 0x85, 0xAB, 0x09, 0x4F, 0x95, 0x39, 0xB1, 0x02, 0x85, 0xAC, 0x09, 0x50, 0x95, 0x39,
+    0xB1, 0x02, 0x85, 0xAD, 0x09, 0x51, 0x95, 0x0B, 0xB1, 0x02, 0x85, 0xAE, 0x09, 0x52, 0x95, 0x01,
+    0xB1, 0x02, 0x85, 0xAF, 0x09, 0x53, 0x95, 0x02, 0xB1, 0x02, 0x85, 0xB0, 0x09, 0x54, 0x95, 0x3F,
+    0xB1, 0x02, 0x85, 0xB1, 0x09, 0x55, 0x95, 0x02, 0xB1, 0x02, 0x85, 0xB2, 0x09, 0x56, 0x95, 0x02,
+    0xB1, 0x02, 0xC0
 };
 // clang-format on
 
@@ -451,8 +151,18 @@ struct VirtualDevice::Impl {
     int fd = -1;
     std::uint8_t counter = 0; // 6-bit frame counter
 
+    // Permanent background thread variables
+    std::atomic<bool> running{false};
+    std::thread io_thread;
+
     ~Impl() {
         if (fd >= 0) {
+            // Safely shut down the background thread
+            running.store(false, std::memory_order_relaxed);
+            if (io_thread.joinable()) {
+                io_thread.join();
+            }
+
             // Destroy the UHID device
             struct uhid_event ev{};
             ev.type = UHID_DESTROY;
@@ -478,16 +188,19 @@ VirtualDevice::VirtualDevice()
 
     auto& cr = ev.u.create2;
     std::strncpy(reinterpret_cast<char*>(cr.name),
-                 "Wireless Controller",
+                 "Sony Computer Entertainment Wireless Controller",
                  sizeof(cr.name) - 1);
     std::strncpy(reinterpret_cast<char*>(cr.phys),
                  "ds4linux/virtual",
                  sizeof(cr.phys) - 1);
+    std::strncpy(reinterpret_cast<char*>(cr.uniq),
+                 "30:0e:d5:89:8c:29",
+                 sizeof(cr.uniq) - 1);
 
     cr.bus     = BUS_USB;
     cr.vendor  = kVidSony;
-    cr.product = kPidDS4v2;     // DS4 v2 — broader native PC support
-    cr.version = 0x0100;
+    cr.product = kPidDS4v1;     // DS4 v1 (CUH-ZCT1x)
+    cr.version = 0x0111;        // v1.11 Gamepad
     cr.country = 0;
 
     // Embed the HID report descriptor
@@ -497,8 +210,28 @@ VirtualDevice::VirtualDevice()
                 sizeof(kDS4HidReportDescriptor));
     cr.rd_size = sizeof(kDS4HidReportDescriptor);
 
+    // ── Permanent Background I/O Thread ──────────────────────────────────────
+    // The kernel probe runs asynchronously, meaning the driver may request the
+    // MAC address (0x81) after this constructor returns. Furthermore, the main
+    // loop does not poll the UHID fd for rumble/LED output events. We must keep
+    // a thread permanently alive to answer requests and process outputs.
+    impl_->running.store(true, std::memory_order_relaxed);
+    impl_->io_thread = std::thread([this]() {
+        struct pollfd pfd{};
+        pfd.fd = impl_->fd;
+        pfd.events = POLLIN;
+        while (impl_->running.load(std::memory_order_relaxed)) {
+            // Poll with a 100ms timeout to periodically check the 'running' flag
+            if (::poll(&pfd, 1, 100) > 0) {
+                this->process_output();
+            }
+        }
+    });
+
     if (::write(impl_->fd, &ev, sizeof(ev)) < 0) {
         int err = errno;
+        impl_->running.store(false, std::memory_order_relaxed);
+        impl_->io_thread.join();
         ::close(impl_->fd);
         impl_->fd = -1;
         throw std::system_error(err, std::system_category(),
@@ -506,7 +239,7 @@ VirtualDevice::VirtualDevice()
     }
 
     std::cout << "[ds4linux] Virtual DS4 gamepad created via UHID "
-              << "(VID=054C PID=09CC)\n";
+              << "(VID=054C PID=05C4)\n";
 }
 
 VirtualDevice::~VirtualDevice() = default;
@@ -661,11 +394,12 @@ RumbleOutput VirtualDevice::process_output() {
             }
             case 0x81: {
                 // MAC address (7 bytes: ID + 6 MAC octets)
-                // Sony OUI 00:17:C8 — passes winebus.sys vendor check
+                // Authentic DS4 v1 OUI/MAC: 30:0E:D5:89:8C:29
                 std::uint8_t mac[7]{};
                 mac[0] = 0x81;
-                mac[1] = 0x00; mac[2] = 0x17; mac[3] = 0xC8;
-                mac[4] = 0x2A; mac[5] = 0x8B; mac[6] = 0x44;
+                // Reversed for Little-Endian parsing -> 30:0E:D5:89:8C:29
+                mac[1] = 0x29; mac[2] = 0x8C; mac[3] = 0x89;
+                mac[4] = 0xD5; mac[5] = 0x0E; mac[6] = 0x30;
                 reply.u.get_report_reply.size = sizeof(mac);
                 std::memcpy(reply.u.get_report_reply.data, mac, sizeof(mac));
                 break;
@@ -674,19 +408,24 @@ RumbleOutput VirtualDevice::process_output() {
                 // DS4 firmware info (49 bytes) — zeroed with report ID
                 std::uint8_t info[49]{};
                 info[0] = 0xA3;
-                // Byte 1-2: HW version (faked)
+                // Byte 1-2: HW version
                 info[1] = 0x00; info[2] = 0x01;
-                // Bytes 4-9: device MAC (same as 0x81, Sony OUI)
-                info[4] = 0x00; info[5] = 0x17; info[6] = 0xC8;
-                info[7] = 0x2A; info[8] = 0x8B; info[9] = 0x44;
+                // Reversed for Little-Endian parsing -> 30:0E:D5:89:8C:29
+                info[4] = 0x29; info[5] = 0x8C; info[6] = 0x89;
+                info[7] = 0xD5; info[8] = 0x0E; info[9] = 0x30;
                 reply.u.get_report_reply.size = sizeof(info);
                 std::memcpy(reply.u.get_report_reply.data, info, sizeof(info));
                 break;
             }
             case 0x12: {
-                // Paired device / link key (16 bytes)
+                // Paired device / link key / MAC (16 bytes)
                 std::uint8_t lk[16]{};
                 lk[0] = 0x12;
+                
+                // Reversed for Little-Endian parsing -> 30:0E:D5:89:8C:29
+                lk[1] = 0x29; lk[2] = 0x8C; lk[3] = 0x89;
+                lk[4] = 0xD5; lk[5] = 0x0E; lk[6] = 0x30;
+                
                 reply.u.get_report_reply.size = sizeof(lk);
                 std::memcpy(reply.u.get_report_reply.data, lk, sizeof(lk));
                 break;
@@ -703,7 +442,20 @@ RumbleOutput VirtualDevice::process_output() {
             }
             } // switch rnum
 
-            [[maybe_unused]] auto _ = ::write(impl_->fd, &reply, sizeof(reply));
+            ssize_t rc;
+            int retries = 0;
+            do {
+                rc = ::write(impl_->fd, &reply, sizeof(reply));
+                if (rc < 0 && errno == EAGAIN) {
+                    retries++;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            } while (rc < 0 && errno == EAGAIN && retries < 10);
+
+            if (rc < 0) {
+                std::cerr << "[ds4linux] Failed to write UHID_GET_REPORT_REPLY (rnum: "
+                          << (int)rnum << ") Error: " << errno << "\n";
+            }
             break;
         }
 
@@ -713,7 +465,19 @@ RumbleOutput VirtualDevice::process_output() {
             reply.type = UHID_SET_REPORT_REPLY;
             reply.u.set_report_reply.id  = ev.u.set_report.id;
             reply.u.set_report_reply.err = 0;
-            [[maybe_unused]] auto _ = ::write(impl_->fd, &reply, sizeof(reply));
+            ssize_t rc;
+            int retries = 0;
+            do {
+                rc = ::write(impl_->fd, &reply, sizeof(reply));
+                if (rc < 0 && errno == EAGAIN) {
+                    retries++;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+            } while (rc < 0 && errno == EAGAIN && retries < 50);
+            
+            if (rc < 0) {
+                std::cerr << "[ds4linux] CRITICAL: Failed to send MAC address to kernel. Errno: " << errno << "\n";
+            }
             break;
         }
 
