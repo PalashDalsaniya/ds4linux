@@ -1,6 +1,6 @@
 # ds4linux
 
-A native Linux clone of [DS4Windows](https://github.com/Ryochan7/DS4Windows) — a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uinput`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 device, and forwards all input and LED control. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
+A native Linux clone of [DS4Windows](https://github.com/Ryochan7/DS4Windows) - a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uinput`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 device, and forwards all input and LED control. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
 
 > **⚠️ GUI Notice:** The Qt 6 GUI portion of this project has been **scratched** and is no longer maintained. The code remains in the `gui/` directory but **GUI features may not work**. Only the daemon is actively supported. **If there is high user demand, I may pick up GUI development again in the future.**
 
@@ -66,7 +66,7 @@ echo "uinput" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
 
 ### 1. Connect your controller
 
-Connect your controller via **USB or Bluetooth**. The daemon must be started *after* the controller is connected — it only scans for devices once on launch.
+Connect your controller via **USB or Bluetooth**. The daemon must be started *after* the controller is connected - it only scans for devices once on launch.
 
 ### 2. Start the daemon
 
@@ -122,6 +122,6 @@ ds4linux/
 | ---- | ------ | ----- |
 | Detroit: Become Human | ❌ Does not work | |
 
-If a game doesn't work with ds4linux, you can try [SenseShock](https://github.com/nowrep/senseshock) as an alternative.
+If a game doesn't work with ds4linux, you can try [SenseShock](https://github.com/muhammad23012009/senseshock) as an alternative.
 
 If you have tested ds4linux with a game, please let me know so I can add it to this list! You can contact me on Discord: **palashd**
