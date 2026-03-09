@@ -8,7 +8,7 @@
 namespace ds4linux {
 
 // ── Version ──────────────────────────────────────────────────────────────────
-inline constexpr std::string_view kVersion = "0.1.0";
+inline constexpr std::string_view kVersion = "0.1.1";
 
 // ── IPC ──────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kSocketPath = "/run/ds4linux.sock";
