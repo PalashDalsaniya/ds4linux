@@ -26,7 +26,7 @@ The daemon:
 
 ## Installation
 
-Pre-built packages are available on the [GitHub Releases](https://github.com/ds4linux/ds4linux/releases) page. Download the appropriate package for your distribution and install as follows:
+Pre-built packages are available on the [GitHub Releases](https://github.com/PalashDalsaniya/ds4linux/releases) page. Download the appropriate package for your distribution and install as follows:
 
 ### Debian / Ubuntu / Linux Mint (.deb)
 
@@ -163,4 +163,5 @@ If you have tested ds4linux with a game, please let me know so I can add it to t
 
 - Fix rumble functionality (currently not working)
 - Pick up GUI development and make it usable
+- take input from xbox or generic controller and translate to dualshock
 - Add Xbox 360 controller emulation (lower priority since Steam Input already provides this)
