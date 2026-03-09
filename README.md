@@ -34,13 +34,13 @@ Pre-built packages are available on the [GitHub Releases](https://github.com/ds4
 sudo apt install ./ds4linux-*-Linux.deb
 ```
 
-### Fedora / Bazzite (.rpm)
+### Fedora (.rpm)
 
 ```bash
 sudo dnf install ./ds4linux-*-Linux.rpm
 ```
 
-#### Bazzite / Kinoite (Immutable OS)
+### Bazzite (Immutable OS)
 
 ```bash
 sudo rpm-ostree install ./ds4linux-*-Linux.rpm
