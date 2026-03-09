@@ -120,7 +120,7 @@ ds4linux/
 
 | Game | Status | Notes |
 | ---- | ------ | ----- |
-| Detroit: Become Human | ❌ Does not work | |
+| Detroit: Become Human | ❌ Does not work | works with [SenseShock](https://github.com/muhammad23012009/senseshock) |
 
 If a game doesn't work with ds4linux, you can try [SenseShock](https://github.com/muhammad23012009/senseshock) as an alternative.
 
