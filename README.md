@@ -49,9 +49,7 @@ systemctl reboot
 
 ---
 
-## Building from Source (Arch Linux / Manual Build)
-
-### Quick Install (Arch)
+### Arch (Install Script)
 
 ```bash
 git clone https://github.com/ds4linux/ds4linux.git
