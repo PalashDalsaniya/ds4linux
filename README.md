@@ -125,3 +125,9 @@ ds4linux/
 If a game doesn't work with ds4linux, you can try [SenseShock](https://github.com/muhammad23012009/senseshock) as an alternative.
 
 If you have tested ds4linux with a game, please let me know so I can add it to this list! You can contact me on Discord: **palashd**
+
+# TODO
+
+- Fix rumble functionality (currently not working)
+- Pick up GUI development and make it usable
+- Add Xbox 360 controller emulation (lower priority since Steam Input already provides this)
