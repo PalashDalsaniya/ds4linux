@@ -47,8 +47,6 @@ sudo rpm-ostree install ./ds4linux-*-Linux.rpm
 systemctl reboot
 ```
 
----
-
 ### Arch (Install Script)
 
 ```bash
@@ -70,6 +68,10 @@ The install script will:
 ```bash
 # Install dependencies
 sudo pacman -S --needed cmake ninja gcc libevdev nlohmann-json
+
+# Clone Repo
+git clone https://github.com/PalashDalsaniya/ds4linux.git
+cd ds4linux
 
 # Build
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -106,7 +108,7 @@ sudo ds4linux-daemon
 
 Press `Ctrl+C` to stop the daemon when you're done.
 
-### 3. Launch Steam
+### 3. Launch Steam (or any other game launcher)
 
 For best compatibility, **open Steam after the daemon is running**. This ensures Steam only sees the virtual DS4 device and avoids conflicts with the daemon's exclusive grab on the physical controller.
 
