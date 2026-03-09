@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# Reload udev rules so the system sees the new 99-ds4linux.rules file
+udevadm control --reload-rules
+
+# Trigger udev to apply the rules to devices that are ALREADY plugged in
+udevadm trigger
+
+# Ensure the uinput module is loaded immediately without needing a reboot
+if ! lsmod | grep -q uinput; then
+    modprobe uinput || true
+fi
+
+exit 0

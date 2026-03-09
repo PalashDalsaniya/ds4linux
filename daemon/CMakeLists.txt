@@ -22,7 +22,7 @@ target_compile_features(ds4linux-daemon PRIVATE cxx_std_20)
 
 # Optimise for low latency in release builds
 target_compile_options(ds4linux-daemon PRIVATE
-    $<$<CONFIG:Release>:-march=native -flto>
+    $<$<CONFIG:Release>:-O3 -flto>
 )
 target_link_options(ds4linux-daemon PRIVATE
     $<$<CONFIG:Release>:-flto>
