@@ -1,0 +1,44 @@
+name: Build and Release Packages
+
+# This workflow triggers automatically whenever you push a version tag (e.g., v0.1.0)
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-release:
+    name: Generate DEB and RPM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to allow the GitHub bot to create the Release
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        # We install 'rpm' here so the Ubuntu runner's CPack knows how to generate Fedora packages!
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build build-essential libevdev-dev nlohmann-json3-dev rpm
+
+      - name: Configure CMake
+        # We inject your new ENABLE_PACKAGING flag here
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDS4LINUX_ENABLE_PACKAGING=ON
+
+      - name: Build ds4linux
+        run: cmake --build build -j$(nproc)
+
+      - name: Generate Packages (CPack)
+        working-directory: build
+        run: cpack
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          # Automatically grabs the generated .deb and .rpm files and attaches them
+          files: |
+            build/*.deb
+            build/*.rpm
+          generate_release_notes: true
