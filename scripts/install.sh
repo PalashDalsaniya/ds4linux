@@ -1,34 +1,37 @@
 #!/usr/bin/env bash
-# ds4linux — Quick install script for Arch-based systems
+# ds4linux — Build & install script for Arch-based systems
 set -euo pipefail
 
-echo "=== ds4linux installer ==="
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# 1. Install dependencies
-echo "[1/5] Installing dependencies..."
+echo "=== ds4linux installer ==="
+echo ""
+
+# ── 1. Install build dependencies ────────────────────────────────────────────
+echo "[1/4] Installing dependencies..."
 sudo pacman -S --needed --noconfirm \
     cmake ninja gcc \
     libevdev \
-    qt6-base qt6-wayland \
     nlohmann-json
 
-# 2. Build
-echo "[2/5] Building..."
-cd "$(dirname "$0")/.."
+# ── 2. Build the daemon ──────────────────────────────────────────────────────
+echo "[2/4] Building daemon..."
+cd "$PROJECT_DIR"
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-# 3. Install binaries
-echo "[3/5] Installing binaries..."
+# ── 3. Install binaries ──────────────────────────────────────────────────────
+echo "[3/4] Installing binaries..."
 sudo cmake --install build --prefix /usr
 
-# 4. Install systemd service
-echo "[4/5] Installing systemd service..."
-sudo cp config/ds4linux.service /etc/systemd/system/
-sudo systemctl daemon-reload
+# ── 4. Install udev rules ─────────────────────────────────────────────────────
+echo "[4/4] Installing udev rules..."
+sudo cp "$PROJECT_DIR/config/99-ds4linux.rules" /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
 
-# 5. Set up uinput module
-echo "[5/5] Ensuring uinput module is loaded..."
+# Ensure uinput module is loaded now and on boot
 if ! lsmod | grep -q uinput; then
     sudo modprobe uinput
 fi
@@ -36,5 +39,10 @@ echo "uinput" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
 
 echo ""
 echo "=== Installation complete ==="
-echo "Start the daemon:  sudo systemctl enable --now ds4linux"
-echo "Launch the GUI:    ds4linux-gui"
+echo ""
+echo "Usage:"
+echo "  1. Connect your DualShock 4 / DualSense controller (USB or Bluetooth)."
+echo "  2. Run the daemon:"
+echo "       sudo ds4linux-daemon"
+echo "  3. Open Steam AFTER the daemon is running for best compatibility."
+echo "  4. When done, press Ctrl+C to stop the daemon."
