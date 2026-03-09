@@ -66,7 +66,7 @@ echo "uinput" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
 
 ### 1. Connect your controller
 
-Connect your controller via **USB or Bluetooth**. The daemon must be started *after* the controller is connected — it only scans for devices once on launch.
+Connect your controller via **USB or Bluetooth**. The daemon must be started *after* the controller is connected, it only scans for devices once on launch.
 
 ### 2. Start the daemon
 
