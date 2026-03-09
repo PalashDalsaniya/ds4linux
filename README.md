@@ -1,8 +1,10 @@
+
 # ds4linux
 
 A native Linux clone of [DS4Windows](https://github.com/Ryochan7/DS4Windows) - a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uinput`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 device, and forwards all input and LED control. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
 
 > **⚠️ GUI Notice:** The Qt 6 GUI portion of this project has been **scratched** and is no longer maintained. The code remains in the `gui/` directory but **GUI features may not work**. Only the daemon is actively supported. **If there is high user demand, I may pick up GUI development again in the future.**
+
 
 ## How It Works
 
@@ -13,6 +15,7 @@ The daemon:
 4. Forwards all input events.
 5. Installs udev rules to hide the physical controller and expose only the virtual one.
 
+
 ## Prerequisites
 
 - Arch Linux
@@ -20,7 +23,33 @@ The daemon:
 - `libevdev`
 - `nlohmann-json`
 
+
 ## Installation
+
+Pre-built packages are available on the [GitHub Releases](https://github.com/ds4linux/ds4linux/releases) page. Download the appropriate package for your distribution and install as follows:
+
+### Debian / Ubuntu / Linux Mint (.deb)
+
+```bash
+sudo apt install ./ds4linux-*-Linux.deb
+```
+
+### Fedora / Bazzite (.rpm)
+
+```bash
+sudo dnf install ./ds4linux-*-Linux.rpm
+```
+
+#### Bazzite / Kinoite (Immutable OS)
+
+```bash
+sudo rpm-ostree install ./ds4linux-*-Linux.rpm
+systemctl reboot
+```
+
+---
+
+## Building from Source (Arch Linux / Manual Build)
 
 ### Quick Install (Arch)
 
@@ -60,6 +89,7 @@ sudo modprobe uinput
 echo "uinput" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
 ```
 
+
 ## Usage
 
 > **Important:** Connect your DualShock 4 or DualSense controller **before** starting the daemon. The daemon scans for controllers once at startup.
@@ -82,6 +112,7 @@ Press `Ctrl+C` to stop the daemon when you're done.
 
 For best compatibility, **open Steam after the daemon is running**. This ensures Steam only sees the virtual DS4 device and avoids conflicts with the daemon's exclusive grab on the physical controller.
 
+
 ## Project Structure
 
 ```
@@ -101,11 +132,13 @@ ds4linux/
 └── scripts/                    # Build & install script
 ```
 
+
 ## Troubleshooting
 
 - **Daemon doesn't detect controller:** Make sure the controller is connected (USB or Bluetooth) *before* starting the daemon.
 - **Steam shows duplicate controllers:** Ensure the udev rules are installed (`/etc/udev/rules.d/99-ds4linux.rules`) and that Steam was launched *after* the daemon.
 - **Permission errors:** The daemon needs root. Run with `sudo`.
+
 
 ## Game Compatibility
 
