@@ -159,9 +159,17 @@ If a game doesn't work with ds4linux, you can try [SenseShock](https://github.co
 
 If you have tested ds4linux with a game, please let me know so I can add it to this list! You can contact me on Discord: **palashd**
 
-# TODO
+# Roadmap
 
 - Fix rumble functionality (currently not working)
-- Pick up GUI development and make it usable
+- Resurrect GUI development
 - take input from xbox or generic controller and translate to dualshock
-- Add Xbox 360 controller emulation (lower priority since Steam Input already provides this)
+- Add input support for standard Xbox, Nintendo Switch Pro, Dualshock 3, and Generic controllers (auto detected)
+- Add Xbox 360 controller emulation
+- have option to switch and choose between virtual ds4 or xbox360
+- Add Visual Controller Tester
+- options to control everything without GUI using CLI
+- custom lightbar colors on supported controllers
+- Custom settings profiles
+- button remapping
+- Emulate Dualsense so it can connect it by bluetooth and have functional adaptive triggers (for games that only support it on usb)
