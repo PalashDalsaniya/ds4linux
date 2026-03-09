@@ -1,7 +1,7 @@
 
 # ds4linux
 
-A native Linux clone of [DS4Windows](https://github.com/Ryochan7/DS4Windows) - a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uinput`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 device, and forwards all input and LED control. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
+A native Linux clone of [DS4Windows](https://ds4-windows.com/download/) - a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uinput`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 device, and forwards all input and LED control. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
 
 > **⚠️ GUI Notice:** The Qt 6 GUI portion of this project has been **scratched** and is no longer maintained. The code remains in the `gui/` directory but **GUI features may not work**. Only the daemon is actively supported. **If there is high user demand, I may pick up GUI development again in the future.**
 
@@ -26,7 +26,7 @@ The daemon:
 
 ## Installation
 
-Pre-built packages are available on the [GitHub Releases](https://github.com/PalashDalsaniya/ds4linux/releases) page. Download the appropriate package for your distribution and install as follows:
+Pre-built packages are available on the [GitHub Releases](https://github.com/ds4linux/ds4linux/releases) page. Download the appropriate package for your distribution and install as follows:
 
 ### Debian / Ubuntu / Linux Mint (.deb)
 
