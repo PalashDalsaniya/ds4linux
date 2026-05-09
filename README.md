@@ -145,6 +145,7 @@ ds4linux/
 | ---- | ------ |
 | Hades | ✅ Works |
 | The Stanley Parable: Ultra Deluxe | ✅ Works |
+| Titanfall 2 | ✅ Works |
 
 ### Not Working
 
