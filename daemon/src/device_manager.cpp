@@ -350,8 +350,32 @@ void DeviceManager::translate_events() {
         if (slot.physical_touchpad && slot.virtual_touchpad) {
             slot.physical_touchpad->read_events(
                 [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
+                    auto& s = slot.ds4_state;
+
+                    // Accumulate touch state for the DS4 HID report.
+                    if (type == EV_ABS) {
+                        switch (code) {
+                        case ABS_MT_POSITION_X:
+                            s.touch_x = static_cast<std::uint16_t>(value & 0x0FFF);
+                            break;
+                        case ABS_MT_POSITION_Y:
+                            s.touch_y = static_cast<std::uint16_t>(value & 0x0FFF);
+                            break;
+                        case ABS_MT_TRACKING_ID:
+                            s.touch_active = (value >= 0);
+                            if (value >= 0) s.touch_id = static_cast<std::uint8_t>(value & 0x7F);
+                            break;
+                        }
+                    } else if (type == EV_KEY) {
+                        if (code == BTN_TOUCH)      s.touch_active = (value != 0);
+                        else if (code == BTN_LEFT)  s.touchpad     = (value != 0); // touchpad click
+                    }
+
                     if (type == EV_SYN) {
                         slot.virtual_touchpad->syn();
+                        // Push a report immediately: touch motion must reach
+                        // the game without waiting for gamepad-node activity.
+                        if (slot.virtual_dev) slot.virtual_dev->send_report(s);
                     } else {
                         slot.virtual_touchpad->emit(type, code, value);
                     }

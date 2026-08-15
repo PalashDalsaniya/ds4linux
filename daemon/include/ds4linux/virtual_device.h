@@ -35,6 +35,12 @@ struct DS4InputState {
     bool ps       = false;    // PS/Home button
     bool touchpad = false;    // Touchpad click
 
+    // Touch point 1 (from physical touchpad evdev node, 12-bit sensor coords)
+    bool touch_active = false;
+    std::uint8_t touch_id = 0;
+    std::uint16_t touch_x = 0;
+    std::uint16_t touch_y = 0;
+
     std::uint8_t l2 = 0;     // L2 trigger analog (0–255)
     std::uint8_t r2 = 0;     // R2 trigger analog (0–255)
 };
