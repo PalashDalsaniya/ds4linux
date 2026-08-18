@@ -199,7 +199,7 @@ VirtualDevice::VirtualDevice()
     cr.bus     = BUS_USB;
     cr.vendor  = kVidSony;
     cr.product = kPidDS4v1;     // DS4 v1 (CUH-ZCT1x)
-    cr.version = 0x0111;        // v1.11 Gamepad
+    cr.version = 0x0100;        // DS4 bcdDevice (Detroit VER gate needs 0100)
     cr.country = 0;
 
     // Embed the HID report descriptor
