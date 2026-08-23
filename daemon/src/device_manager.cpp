@@ -352,22 +352,42 @@ void DeviceManager::translate_events() {
                 [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
                     auto& s = slot.ds4_state;
 
-                    // Accumulate touch state for the DS4 HID report.
+                    // Accumulate per-slot touch state for the DS4 HID report.
+                    // MT protocol type B: events arrive for the CURRENT slot
+                    // (ABS_MT_SLOT switches it). The DS5 sensor runs a lifetime
+                    // monotonic touch counter as the tracking id and emits
+                    // id=-1 BEFORE BTN_TOUCH=0 (and the next id before
+                    // BTN_TOUCH=1) — so only BTN_TOUCH may clear contacts;
+                    // trusting the id alone drops fingers mid-stroke.
+                    static thread_local int cur_slot = 0;
                     if (type == EV_ABS) {
                         switch (code) {
+                        case ABS_MT_SLOT:
+                            cur_slot = (value >= 0 && value <= 1) ? value : 0;
+                            break;
                         case ABS_MT_POSITION_X:
-                            s.touch_x = static_cast<std::uint16_t>(value & 0x0FFF);
+                            s.touch[cur_slot].x = static_cast<std::uint16_t>(value & 0x0FFF);
                             break;
                         case ABS_MT_POSITION_Y:
-                            s.touch_y = static_cast<std::uint16_t>(value & 0x0FFF);
+                            // DS5 sensor Y is 0..1079; the DS4 report field is
+                            // 0..941 — rescale, else vertical compresses
+                            s.touch[cur_slot].y = static_cast<std::uint16_t>(
+                                (static_cast<std::int64_t>(value < 0 ? 0 : value)
+                                 * 941 + 539) / 1079);
                             break;
                         case ABS_MT_TRACKING_ID:
-                            s.touch_active = (value >= 0);
-                            if (value >= 0) s.touch_id = static_cast<std::uint8_t>(value & 0x7F);
+                            s.touch[cur_slot].id = static_cast<std::uint8_t>(value & 0x7F);
+                            s.touch[cur_slot].occupied = (value >= 0);
                             break;
                         }
                     } else if (type == EV_KEY) {
-                        if (code == BTN_TOUCH)      s.touch_active = (value != 0);
+                        if (code == BTN_TOUCH) {
+                            s.touch_down = (value != 0);
+                            if (!s.touch_down) {
+                                s.touch[0].occupied = false;
+                                s.touch[1].occupied = false;
+                            }
+                        }
                         else if (code == BTN_LEFT)  s.touchpad     = (value != 0); // touchpad click
                     }
 

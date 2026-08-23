@@ -320,22 +320,26 @@ void VirtualDevice::send_report(const DS4InputState& s) {
 
     // Touchpad data (DS4 USB report layout, matches Detroit/libScePad parser
     // and DS4Windows DS4_TOUCHPAD_DATA_OFFSET):
-    //   byte 33: connection type (0x00 — not parsed as touch data)
-    //   byte 34: touch packet counter (increments every report)
-    //   bytes 35-38: touch point 1 — [35] bit7=1 no touch / bits0-6 id,
-    //                [36] X low 8, [37] X high 4 | Y low 4, [38] Y high 8
-    //   bytes 39-42: touch point 2 (unused, marked inactive)
-    report[33] = 0x00;
+    //   byte 33: num_touch_reports — hid-playstation parses this as the
+    //            COUNT of buffered touch packets; 0x00 silences the touchpad
+    //            node entirely (no libinput cursor). One packet per report.
+    //   byte 34: first touch packet timestamp (counter)
+    //   bytes 35-38 / 39-42: touch points 1/2 — per point: bit7=1 no touch,
+    //            else stable slot id; [X low 8][X high 4 | Y low 4][Y high 8]
+    report[33] = 0x01;
     report[34] = impl_->touch_counter++;
-    if (s.touch_active) {
-        report[35] = s.touch_id & 0x7F;
-        report[36] = static_cast<std::uint8_t>(s.touch_x & 0xFF);
-        report[37] = static_cast<std::uint8_t>(((s.touch_y & 0x0F) << 4) | ((s.touch_x >> 8) & 0x0F));
-        report[38] = static_cast<std::uint8_t>((s.touch_y >> 4) & 0xFF);
-    } else {
-        report[35] = 0x80; // no touch: bit 7 set
+    const std::uint8_t pt_off[2] = {35, 39};
+    for (int i = 0; i < 2; ++i) {
+        const auto& tp = s.touch[i];
+        if (tp.occupied) {
+            report[pt_off[i]]     = static_cast<std::uint8_t>(0x01 + i); // stable slot id (sensor's lifetime counter would make libinput see a new finger every frame)
+            report[pt_off[i] + 1] = static_cast<std::uint8_t>(tp.x & 0xFF);
+            report[pt_off[i] + 2] = static_cast<std::uint8_t>(((tp.y & 0x0F) << 4) | ((tp.x >> 8) & 0x0F));
+            report[pt_off[i] + 3] = static_cast<std::uint8_t>((tp.y >> 4) & 0xFF);
+        } else {
+            report[pt_off[i]] = 0x80; // no touch: bit 7 set
+        }
     }
-    report[39] = 0x80; // touch point 2: inactive
 
     // ── Dispatch via UHID_INPUT2 ─────────────────────────────────────────────
     struct uhid_event ev{};

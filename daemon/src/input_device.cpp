@@ -47,6 +47,16 @@ struct InputDevice::Impl {
     std::string      evdev_path_;
     int              hidraw_fd_ = -1;
 
+    // Persistent DualSense output state (combined-report model, see
+    // send_dualsense_output): rumble and lightbar must ride ONE report —
+    // a partial report zeroes the other effect ~4 ms later.
+    struct DsOut {
+        bool rumble_valid = false, light_valid = false;
+        std::uint8_t strong = 0, weak = 0;
+        std::uint8_t r = 0, g = 0, b = 0;
+        std::uint8_t bt_seq = 0;
+    } ds_out{};
+
     ~Impl() {
         if (grabbed && fd >= 0) {
             ::ioctl(fd, EVIOCGRAB, 0); // release grab
@@ -279,15 +289,11 @@ bool InputDevice::set_lightbar(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
 
     if (impl_->model_ == ControllerModel::DualSense ||
         impl_->model_ == ControllerModel::DualSenseEdge) {
-        // DualSense USB output report 0x02, 48 bytes
-        std::uint8_t buf[48]{};
-        buf[0] = 0x02;
-        buf[1] = 0x04; // flags: lightbar
-        buf[2] = 0x00;
-        buf[45] = r;
-        buf[46] = g;
-        buf[47] = b;
-        return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+        impl_->ds_out.light_valid = true;
+        impl_->ds_out.r = r;
+        impl_->ds_out.g = g;
+        impl_->ds_out.b = b;
+        return send_dualsense_output();
     } else {
         // DS4 USB output report 0x05
         std::uint8_t buf[32]{};
@@ -309,19 +315,10 @@ bool InputDevice::set_rumble(std::uint8_t heavy, std::uint8_t light) {
 
     if (impl_->model_ == ControllerModel::DualSense ||
         impl_->model_ == ControllerModel::DualSenseEdge) {
-        // DualSense USB output report 0x02, 48 bytes
-        // Byte 0: report ID (0x02)
-        // Byte 1: valid_flag0 — 0x01 = haptics enable, 0x02 = haptics disable
-        // Byte 2: valid_flag1
-        // Byte 3: right motor (light/weak)
-        // Byte 4: left motor (heavy/strong)
-        std::uint8_t buf[48]{};
-        buf[0] = 0x02;
-        buf[1] = 0x01 | 0x02; // enable haptics + motor control
-        buf[2] = 0x00;
-        buf[3] = light;
-        buf[4] = heavy;
-        return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+        impl_->ds_out.rumble_valid = true;
+        impl_->ds_out.strong = heavy; // motor_left
+        impl_->ds_out.weak   = light; // motor_right
+        return send_dualsense_output();
     } else {
         // DS4 USB output report 0x05
         std::uint8_t buf[32]{};
