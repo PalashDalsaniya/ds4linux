@@ -47,6 +47,16 @@ struct InputDevice::Impl {
     std::string      evdev_path_;
     int              hidraw_fd_ = -1;
 
+    // Persistent DualSense output state (combined-report model, see
+    // send_dualsense_output): rumble and lightbar must ride ONE report —
+    // a partial report zeroes the other effect ~4 ms later.
+    struct DsOut {
+        bool rumble_valid = false, light_valid = false;
+        std::uint8_t strong = 0, weak = 0;
+        std::uint8_t r = 0, g = 0, b = 0;
+        std::uint8_t bt_seq = 0;
+    } ds_out{};
+
     ~Impl() {
         if (grabbed && fd >= 0) {
             ::ioctl(fd, EVIOCGRAB, 0); // release grab
@@ -189,6 +199,88 @@ int InputDevice::open_hidraw() const {
     return -1;
 }
 
+// ── DualSense output encoding ────────────────────────────────────────────────
+//
+// Kernel-referenced truth (drivers/hid/hid-playstation.c, usbmon-verified
+// 2026-08-18). USB report 0x02 is 63 bytes; Bluetooth report 0x31 is 78
+// bytes and needs seq + tag + CRC32 (seed 0xA2) over the first 74 bytes.
+//
+//   common fields (BT absolute = USB absolute + 2: USB common@1, BT common@3
+//   after id@0/seq@1/tag@2 — kernel dualsense_output_report_bt):
+//     flag0: 0x02 HAPTICS_SELECT        flag1: 0x04 lightbar enable
+//     flag2@41 (BT): 0x04 COMPATIBLE_VIBRATION2 — the v2-pad rumble switch
+//     [5] motor_right (weak)  [6] motor_left (strong)  [47..49] RGB
+//
+// The old 48-byte writes were never physically verified: truncated lightbar,
+// zero rumble. Also: rumble and lightbar must ride ONE combined report with
+// persistent state (a partial report zeroes the other effect ~4 ms later),
+// mirroring the kernel's output_worker model.
+
+static std::uint32_t crc32_le_raw(std::uint32_t crc, const std::uint8_t* data,
+                                  std::size_t len) {
+    // kernel crc32_le semantics: reflected poly 0xEDB88320, NO pre/post
+    // inversion. Kernel BT output: crc = ~crc32_le(crc32_le(0xFFFFFFFF,
+    // &seed 0xA2, 1), buf, 74). (2026-08-19: the old double-inverted
+    // crc32_update produced a different value — pad dropped every report.)
+    for (std::size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int k = 0; k < 8; ++k)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return crc;
+}
+
+bool InputDevice::send_dualsense_output() {
+    // Persistent combined state — every send carries ALL fields.
+    auto& st = impl_->ds_out;
+
+    if (impl_->conn_ == ConnectionType::USB) {
+        std::uint8_t buf[63]{};
+        buf[0] = 0x02;
+        if (st.rumble_valid) {
+            buf[1]  = 0x02;  // HAPTICS_SELECT
+            buf[39] = 0x04;  // COMPATIBLE_VIBRATION2 (vibration_v2 pads)
+            buf[3]  = st.weak;
+            buf[4]  = st.strong;
+        }
+        if (st.light_valid) {
+            buf[2]   = 0x04; // LIGHTBAR_CONTROL_ENABLE
+            buf[45]  = st.r;
+            buf[46]  = st.g;
+            buf[47]  = st.b;
+        }
+        return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+    }
+
+    // Bluetooth: report 0x31, 78 B, CRC32(seed 0xA2 + bytes 0..73) @74 LE.
+    // seq cycles 0..15 in the HIGH nibble of byte 1; tag 0x10 @ byte 2.
+    std::uint8_t buf[78]{};
+    buf[0] = 0x31;
+    buf[1] = static_cast<std::uint8_t>((st.bt_seq & 0x0F) << 4);
+    st.bt_seq = static_cast<std::uint8_t>((st.bt_seq + 1) & 0x0F);
+    buf[2] = 0x10;
+    if (st.rumble_valid) {
+        buf[3]  = 0x02;  // flag0 (HAPTICS_SELECT)
+        buf[5]  = st.weak;   // motor_right
+        buf[6]  = st.strong; // motor_left
+        buf[41] = 0x04;  // flag2 (COMPATIBLE_VIBRATION2)
+    }
+    if (st.light_valid) {
+        buf[4]  = 0x04;  // flag1 (LIGHTBAR_CONTROL_ENABLE)
+        buf[47] = st.r;
+        buf[48] = st.g;
+        buf[49] = st.b;
+    }
+    std::uint8_t seed = 0xA2;
+    std::uint32_t crc = crc32_le_raw(0xFFFFFFFFu, &seed, 1);
+    crc = ~crc32_le_raw(crc, buf, 74);
+    buf[74] = static_cast<std::uint8_t>(crc & 0xFF);
+    buf[75] = static_cast<std::uint8_t>((crc >> 8) & 0xFF);
+    buf[76] = static_cast<std::uint8_t>((crc >> 16) & 0xFF);
+    buf[77] = static_cast<std::uint8_t>((crc >> 24) & 0xFF);
+    return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+}
+
 bool InputDevice::set_lightbar(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
     if (impl_->hidraw_fd_ < 0) {
         impl_->hidraw_fd_ = open_hidraw();
@@ -197,15 +289,11 @@ bool InputDevice::set_lightbar(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
 
     if (impl_->model_ == ControllerModel::DualSense ||
         impl_->model_ == ControllerModel::DualSenseEdge) {
-        // DualSense USB output report 0x02, 48 bytes
-        std::uint8_t buf[48]{};
-        buf[0] = 0x02;
-        buf[1] = 0x04; // flags: lightbar
-        buf[2] = 0x00;
-        buf[45] = r;
-        buf[46] = g;
-        buf[47] = b;
-        return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+        impl_->ds_out.light_valid = true;
+        impl_->ds_out.r = r;
+        impl_->ds_out.g = g;
+        impl_->ds_out.b = b;
+        return send_dualsense_output();
     } else {
         // DS4 USB output report 0x05
         std::uint8_t buf[32]{};
@@ -227,19 +315,10 @@ bool InputDevice::set_rumble(std::uint8_t heavy, std::uint8_t light) {
 
     if (impl_->model_ == ControllerModel::DualSense ||
         impl_->model_ == ControllerModel::DualSenseEdge) {
-        // DualSense USB output report 0x02, 48 bytes
-        // Byte 0: report ID (0x02)
-        // Byte 1: valid_flag0 — 0x01 = haptics enable, 0x02 = haptics disable
-        // Byte 2: valid_flag1
-        // Byte 3: right motor (light/weak)
-        // Byte 4: left motor (heavy/strong)
-        std::uint8_t buf[48]{};
-        buf[0] = 0x02;
-        buf[1] = 0x01 | 0x02; // enable haptics + motor control
-        buf[2] = 0x00;
-        buf[3] = light;
-        buf[4] = heavy;
-        return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+        impl_->ds_out.rumble_valid = true;
+        impl_->ds_out.strong = heavy; // motor_left
+        impl_->ds_out.weak   = light; // motor_right
+        return send_dualsense_output();
     } else {
         // DS4 USB output report 0x05
         std::uint8_t buf[32]{};

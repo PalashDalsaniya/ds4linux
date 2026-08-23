@@ -70,6 +70,9 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+
+    // Transport-aware DualSense output writer (combined persistent report).
+    bool send_dualsense_output();
 };
 
 } // namespace ds4linux::daemon

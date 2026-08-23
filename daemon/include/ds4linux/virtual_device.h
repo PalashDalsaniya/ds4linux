@@ -35,6 +35,18 @@ struct DS4InputState {
     bool ps       = false;    // PS/Home button
     bool touchpad = false;    // Touchpad click
 
+    // Touch points (from the physical touchpad evdev node). Two slots max:
+    // the DS4 report protocol carries exactly two points (bytes 35-38 and
+    // 39-42) and the DualSense sensor reports two.
+    struct TouchPoint {
+        bool occupied = false; // MT slot has a finger (tracking id >= 0)
+        std::uint8_t id = 0;
+        std::uint16_t x = 0;
+        std::uint16_t y = 0;
+    };
+    TouchPoint touch[2];
+    bool touch_down = false; // BTN_TOUCH level (sensor truth): any contact
+
     std::uint8_t l2 = 0;     // L2 trigger analog (0–255)
     std::uint8_t r2 = 0;     // R2 trigger analog (0–255)
 };

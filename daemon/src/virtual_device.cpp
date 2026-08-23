@@ -45,14 +45,13 @@ namespace ds4linux::daemon {
 
 // clang-format off
 static const std::uint8_t kDS4HidReportDescriptor[] = {
-    // Exact 1:1 hex dump from physical DualShock 4 v1 (CUH-ZCT1x).
-    // Byte 78 (Logical Maximum for 6-bit counter) kept as 0x3F to avoid
-    // Windows hidparse.sys rejecting Sony's native firmware bug.
+    // E6: descriptor is byte-identical to ViGEmBus Ds4HidReportDescriptor (467 B):
+    // native Sony LogicalMax 0x7F on the 6-bit field, no extra 0xB1/0xB2 features.
     0x05, 0x01, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x09, 0x35,
     0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x04, 0x81, 0x02, 0x09, 0x39, 0x15, 0x00, 0x25,
     0x07, 0x35, 0x00, 0x46, 0x3B, 0x01, 0x65, 0x14, 0x75, 0x04, 0x95, 0x01, 0x81, 0x42, 0x65, 0x00,
     0x05, 0x09, 0x19, 0x01, 0x29, 0x0E, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x0E, 0x81, 0x02,
-    0x06, 0x00, 0xFF, 0x09, 0x20, 0x75, 0x06, 0x95, 0x01, 0x15, 0x00, 0x25, 0x3F, 0x81, 0x02, 0x05,
+    0x06, 0x00, 0xFF, 0x09, 0x20, 0x75, 0x06, 0x95, 0x01, 0x15, 0x00, 0x25, 0x7F, 0x81, 0x02, 0x05,
     0x01, 0x09, 0x33, 0x09, 0x34, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x02, 0x81, 0x02,
     0x06, 0x00, 0xFF, 0x09, 0x21, 0x95, 0x36, 0x81, 0x02, 0x85, 0x05, 0x09, 0x22, 0x95, 0x1F, 0x91,
     0x02, 0x85, 0x04, 0x09, 0x23, 0x95, 0x24, 0xB1, 0x02, 0x85, 0x02, 0x09, 0x24, 0x95, 0x24, 0xB1,
@@ -77,7 +76,6 @@ static const std::uint8_t kDS4HidReportDescriptor[] = {
     0xB1, 0x02, 0x85, 0xAB, 0x09, 0x4F, 0x95, 0x39, 0xB1, 0x02, 0x85, 0xAC, 0x09, 0x50, 0x95, 0x39,
     0xB1, 0x02, 0x85, 0xAD, 0x09, 0x51, 0x95, 0x0B, 0xB1, 0x02, 0x85, 0xAE, 0x09, 0x52, 0x95, 0x01,
     0xB1, 0x02, 0x85, 0xAF, 0x09, 0x53, 0x95, 0x02, 0xB1, 0x02, 0x85, 0xB0, 0x09, 0x54, 0x95, 0x3F,
-    0xB1, 0x02, 0x85, 0xB1, 0x09, 0x55, 0x95, 0x02, 0xB1, 0x02, 0x85, 0xB2, 0x09, 0x56, 0x95, 0x02,
     0xB1, 0x02, 0xC0
 };
 // clang-format on
@@ -150,6 +148,7 @@ static void build_calibration_report(std::uint8_t* buf, std::size_t size) {
 struct VirtualDevice::Impl {
     int fd = -1;
     std::uint8_t counter = 0; // 6-bit frame counter
+    std::uint8_t touch_counter = 0; // touch packet counter (report byte 34)
 
     // Permanent background thread variables
     std::atomic<bool> running{false};
@@ -188,7 +187,7 @@ VirtualDevice::VirtualDevice()
 
     auto& cr = ev.u.create2;
     std::strncpy(reinterpret_cast<char*>(cr.name),
-                 "Sony Computer Entertainment Wireless Controller",
+                 "Wireless Controller",
                  sizeof(cr.name) - 1);
     std::strncpy(reinterpret_cast<char*>(cr.phys),
                  "ds4linux/virtual",
@@ -200,7 +199,7 @@ VirtualDevice::VirtualDevice()
     cr.bus     = BUS_USB;
     cr.vendor  = kVidSony;
     cr.product = kPidDS4v1;     // DS4 v1 (CUH-ZCT1x)
-    cr.version = 0x0111;        // v1.11 Gamepad
+    cr.version = 0x0100;        // DS4 bcdDevice (Detroit VER gate needs 0100)
     cr.country = 0;
 
     // Embed the HID report descriptor
@@ -314,12 +313,33 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     // Battery level: report as charged USB (0x0B = full, cable connected)
     report[12] = 0x0B;
 
-    // Touchpad: no active touches — set inactive flags
-    // Byte 33: number of touch reports = 0
-    // Byte 34: touch 0 — contact bit clear, ID 0 (0x80 = inactive)
-    report[33] = 0; // touch report count
-    report[34] = 0x80;
-    report[38] = 0x80;
+    // Byte 30 — battery for hid-playstation / DS4-aware titles (left 0x00 by
+    // UHID forwarder → games read 0% and reject the controller). Low nibble =
+    // capacity (0..10), bit 4 = USB connected → 0x1A = 10/10, USB wired.
+    report[30] = 0x1A;
+
+    // Touchpad data (DS4 USB report layout, matches Detroit/libScePad parser
+    // and DS4Windows DS4_TOUCHPAD_DATA_OFFSET):
+    //   byte 33: num_touch_reports — hid-playstation parses this as the
+    //            COUNT of buffered touch packets; 0x00 silences the touchpad
+    //            node entirely (no libinput cursor). One packet per report.
+    //   byte 34: first touch packet timestamp (counter)
+    //   bytes 35-38 / 39-42: touch points 1/2 — per point: bit7=1 no touch,
+    //            else stable slot id; [X low 8][X high 4 | Y low 4][Y high 8]
+    report[33] = 0x01;
+    report[34] = impl_->touch_counter++;
+    const std::uint8_t pt_off[2] = {35, 39};
+    for (int i = 0; i < 2; ++i) {
+        const auto& tp = s.touch[i];
+        if (tp.occupied) {
+            report[pt_off[i]]     = static_cast<std::uint8_t>(0x01 + i); // stable slot id (sensor's lifetime counter would make libinput see a new finger every frame)
+            report[pt_off[i] + 1] = static_cast<std::uint8_t>(tp.x & 0xFF);
+            report[pt_off[i] + 2] = static_cast<std::uint8_t>(((tp.y & 0x0F) << 4) | ((tp.x >> 8) & 0x0F));
+            report[pt_off[i] + 3] = static_cast<std::uint8_t>((tp.y >> 4) & 0xFF);
+        } else {
+            report[pt_off[i]] = 0x80; // no touch: bit 7 set
+        }
+    }
 
     // ── Dispatch via UHID_INPUT2 ─────────────────────────────────────────────
     struct uhid_event ev{};
@@ -405,14 +425,18 @@ RumbleOutput VirtualDevice::process_output() {
                 break;
             }
             case 0xA3: {
-                // DS4 firmware info (49 bytes) — zeroed with report ID
-                std::uint8_t info[49]{};
-                info[0] = 0xA3;
-                // Byte 1-2: HW version
-                info[1] = 0x00; info[2] = 0x01;
-                // Reversed for Little-Endian parsing -> 30:0E:D5:89:8C:29
-                info[4] = 0x29; info[5] = 0x8C; info[6] = 0x89;
-                info[7] = 0xD5; info[8] = 0x0E; info[9] = 0x30;
+                // DS4 firmware info (49 bytes) — ViGEmBus Ds4Pdo.cpp reference blob.
+                // Detroit/libScePad gate: LE16 version at offset +0x23 must be > 0x30FF;
+                // this blob encodes 0x3100 (firmware build string "Aug  3 2013").
+                static const std::uint8_t info[49] = {
+                    0xA3, 0x41, 0x75, 0x67, 0x20, 0x20, 0x33, 0x20,
+                    0x32, 0x30, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x30, 0x37, 0x3A, 0x30, 0x31, 0x3A, 0x31,
+                    0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x01, 0x00, 0x31, 0x03, 0x00, 0x00,
+                    0x00, 0x49, 0x00, 0x05, 0x00, 0x00, 0x80, 0x03,
+                    0x00
+                };
                 reply.u.get_report_reply.size = sizeof(info);
                 std::memcpy(reply.u.get_report_reply.data, info, sizeof(info));
                 break;
