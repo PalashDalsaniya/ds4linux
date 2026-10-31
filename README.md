@@ -128,7 +128,11 @@ sudo ds4linux-daemon --generic                  # every non-Sony gamepad
 sudo ds4linux-daemon --generic=046d:c21f        # only these VID:PID pairs (see `lsusb`)
 ```
 
-Sticks, buttons, triggers, the D-pad and rumble are forwarded. Controllers without a touchpad or motion sensors report them as idle, and there is no lightbar. Pads with a switchable mode (e.g. Logitech F710) work best in XInput mode.
+Sticks, buttons, triggers, the D-pad and rumble are forwarded. Controllers without a touchpad or motion sensors report them as idle, and there is no lightbar.
+
+Limitations:
+- Only gamepads the kernel exposes with standard gamepad buttons are supported. Pads with a mode switch (e.g. Logitech F710) must be in XInput mode; DirectInput / joystick-class pads are not detected.
+- The controller's `/dev/input/js*` node stays visible but receives no input while the daemon runs.
 
 
 ## Project Structure

@@ -236,10 +236,14 @@ void DeviceManager::scan() {
         auto phys_id = get_physical_id(entry.path().string());
 
         // Skip our own virtual devices (gamepad, touchpad and motion nodes
-        // the kernel DS4 driver creates for the UHID device), and for generic
-        // pads anything without a parent device — uinput gamepads created by
-        // Steam Input or other remappers, which would otherwise feed back.
-        if (is_own_virtual_node(fd, id, phys_id) || (generic && phys_id.empty())) {
+        // the kernel DS4 driver creates for the UHID device).  For generic
+        // pads also skip software devices — uinput pads from Steam Input and
+        // uhid pads from other remappers — which would otherwise feed back.
+        // Bluetooth pads may legitimately live under uhid (bluetoothd).
+        const bool software_device =
+            phys_id.empty() ||
+            (phys_id.starts_with("/sys/devices/virtual/") && id.bustype != BUS_BLUETOOTH);
+        if (is_own_virtual_node(fd, id, phys_id) || (generic && software_device)) {
             ::close(fd);
             continue;
         }
@@ -405,7 +409,16 @@ static GamepadMap build_gamepad_map(const InputDevice& dev) {
     m.synth_r2_btn  = m.r2_code >= 0 && !btn_tr2;
     m.synth_l2_axis = m.l2_code < 0 && btn_tl2;
     m.synth_r2_axis = m.r2_code < 0 && btn_tr2;
+    m.hat_x = dev.abs_range(ABS_HAT0X);
+    m.hat_y = dev.abs_range(ABS_HAT0Y);
     return m;
+}
+
+/// Map a hat axis value to -1 / 0 / +1 around the centre of its range.
+static int hat_direction(std::int32_t v, const AbsRange& r) {
+    if (!r.present || r.maximum <= r.minimum) return std::clamp(v, -1, 1);
+    const std::int64_t twice = 2 * static_cast<std::int64_t>(v) - r.minimum - r.maximum;
+    return twice < 0 ? -1 : twice > 0 ? 1 : 0;
 }
 
 // Analog trigger level at which a synthesised L2/R2 button counts as pressed.
@@ -431,8 +444,8 @@ static void apply_gamepad_event(ControllerSlot& slot, std::uint16_t type,
             if (m.synth_r2_btn) s.r2_btn = s.r2 >= kTriggerButtonThreshold;
             return;
         }
-        if (code == ABS_HAT0X) { s.hat_x = std::clamp(value, -1, 1); return; }
-        if (code == ABS_HAT0Y) { s.hat_y = std::clamp(value, -1, 1); return; }
+        if (code == ABS_HAT0X) { s.hat_x = hat_direction(value, m.hat_x); return; }
+        if (code == ABS_HAT0Y) { s.hat_y = hat_direction(value, m.hat_y); return; }
         return;
     }
 
@@ -520,6 +533,16 @@ static bool refresh_touches(ControllerSlot& slot) {
 
 static constexpr auto kBatteryPollInterval = std::chrono::seconds(5);
 
+// If the motion node has not synced for this long, gamepad / touch syncs end
+// frames instead (e.g. third-party DS4s over Bluetooth that only send minimal
+// reports without IMU data, so the motion node exists but stays silent).
+static constexpr auto kMotionStallTimeout = std::chrono::milliseconds(20);
+
+// hid-playstation sets a default lightbar colour while probing the virtual
+// DS4; ignore LED output this soon after opening so it can't override the
+// profile colour already applied to the physical controller.
+static constexpr auto kProbeOutputGrace = std::chrono::seconds(2);
+
 // ── Translate loop ───────────────────────────────────────────────────────────
 
 void DeviceManager::translate_events() {
@@ -529,7 +552,7 @@ void DeviceManager::translate_events() {
     //   2. Accumulate them into the per-slot DS4InputState.
     //   3. Send one DS4 HID report per physical frame.  The motion node
     //      syncs on every controller report (its timestamp always changes),
-    //      so when present it is the frame clock; otherwise any node's
+    //      so while it is live it is the frame clock; otherwise any node's
     //      SYN_REPORT ends a frame.  A finger going down or up is flushed
     //      immediately so quick taps are never merged away.
     //
@@ -546,14 +569,15 @@ void DeviceManager::translate_events() {
     for (auto& [path, slot] : slots_) {
         if (!slot.physical || !slot.virtual_dev) continue;
 
-        const bool motion_clock = static_cast<bool>(slot.physical_motion);
-        bool frame_end = false;
+        const auto now = std::chrono::steady_clock::now();
+        bool frame_end  = false;   // motion node finished a frame
+        bool input_sync = false;   // gamepad / touchpad node finished a frame
 
         // ── Gamepad events (physical → DS4 HID report) ──────────────────
         bool ok = slot.physical->read_events(
             [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
                 if (type == EV_SYN) {
-                    if (code == SYN_REPORT && !motion_clock) frame_end = true;
+                    if (code == SYN_REPORT) input_sync = true;
                     return;
                 }
                 apply_gamepad_event(slot, type, code, value);
@@ -570,7 +594,7 @@ void DeviceManager::translate_events() {
                 static_cast<std::uint8_t>(out.heavy),
                 static_cast<std::uint8_t>(out.light));
         }
-        if (out.led_changed) {
+        if (out.led_changed && now - slot.opened_at >= kProbeOutputGrace) {
             slot.physical->set_lightbar(out.led_r, out.led_g, out.led_b);
         }
 
@@ -579,7 +603,10 @@ void DeviceManager::translate_events() {
             slot.physical_motion->read_events(
                 [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
                     if (type == EV_SYN) {
-                        if (code == SYN_REPORT) frame_end = true;
+                        if (code == SYN_REPORT) {
+                            frame_end = true;
+                            slot.last_motion_sync = now;
+                        }
                         return;
                     }
                     apply_motion_event(slot, type, code, value);
@@ -597,9 +624,9 @@ void DeviceManager::translate_events() {
                     } else if (type == EV_SYN && code == SYN_REPORT) {
                         if (refresh_touches(slot)) {
                             slot.virtual_dev->send_report(slot.ds4_state);
-                            frame_end = false;
-                        } else if (!motion_clock) {
-                            frame_end = true;
+                            frame_end = input_sync = false;
+                        } else {
+                            input_sync = true;
                         }
                     }
                 }
@@ -607,13 +634,14 @@ void DeviceManager::translate_events() {
         }
 
         // ── Battery (polled from sysfs) ─────────────────────────────────
-        auto now = std::chrono::steady_clock::now();
         if (now >= slot.next_battery_poll) {
             slot.next_battery_poll = now + kBatteryPollInterval;
             slot.ds4_state.battery = slot.physical->battery();
         }
 
-        if (frame_end) {
+        const bool motion_live = slot.physical_motion &&
+                                 now - slot.last_motion_sync < kMotionStallTimeout;
+        if (frame_end || (input_sync && !motion_live)) {
             slot.virtual_dev->send_report(slot.ds4_state);
         }
     }
@@ -640,6 +668,7 @@ bool DeviceManager::open_slot(const std::string& evdev_path,
         ControllerSlot slot;
         slot.evdev_path  = evdev_path;
         slot.physical_id = physical_id;
+        slot.opened_at   = std::chrono::steady_clock::now();
         slot.physical    = std::make_unique<InputDevice>(evdev_path, /*grab=*/true);
         slot.gamepad_map = build_gamepad_map(*slot.physical);
 

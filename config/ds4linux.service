@@ -1,7 +1,8 @@
 [Unit]
 Description=DS4Linux — Sony Controller Bridge Daemon
 Documentation=https://github.com/PalashDalsaniya/ds4linux
-After=systemd-udevd.service
+After=systemd-udevd.service modprobe@uhid.service
+Wants=modprobe@uhid.service
 
 [Service]
 Type=simple

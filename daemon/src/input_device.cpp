@@ -267,7 +267,16 @@ bool InputDevice::send_ff_rumble(std::uint8_t heavy, std::uint8_t light) {
     play.type  = EV_FF;
     play.code  = static_cast<std::uint16_t>(effect.id);
     play.value = (heavy || light) ? 1 : 0;
-    return ::write(impl_->fd, &play, sizeof(play)) == sizeof(play);
+    if (::write(impl_->fd, &play, sizeof(play)) != sizeof(play)) {
+        static bool warned = false;
+        if (!warned) {
+            std::cerr << "[ds4linux] Could not play rumble on " << impl_->evdev_path_
+                      << ": " << std::strerror(errno) << "\n";
+            warned = true;
+        }
+        return false;
+    }
+    return true;
 }
 
 bool InputDevice::set_lightbar(std::uint8_t r, std::uint8_t g, std::uint8_t b) {

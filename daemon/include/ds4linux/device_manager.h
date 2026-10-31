@@ -30,7 +30,7 @@ struct DeviceManagerOptions {
 struct GamepadMap {
     std::uint16_t rx_code = 0, ry_code = 0;   // right stick axes
     int  l2_code = -1, r2_code = -1;          // analog trigger axes, -1 = none
-    AbsRange lx, ly, rx, ry, l2, r2;
+    AbsRange lx, ly, rx, ry, l2, r2, hat_x, hat_y;
     bool synth_l2_btn = false, synth_r2_btn = false;   // digital from analog
     bool synth_l2_axis = false, synth_r2_axis = false; // analog from digital
 };
@@ -56,6 +56,8 @@ struct ControllerSlot {
     // Accumulated DS4 state (packed into one HID report per physical frame)
     DS4InputState ds4_state;
     std::chrono::steady_clock::time_point next_battery_poll{};
+    std::chrono::steady_clock::time_point last_motion_sync{};  // epoch = never
+    std::chrono::steady_clock::time_point opened_at{};
 
     Profile     profile;
     std::string evdev_path;          // gamepad event node path

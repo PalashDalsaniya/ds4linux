@@ -157,8 +157,8 @@ static std::uint64_t steady_now_us() {
 
 // Kernel DS4 battery byte: low nibble 0–10 = level in 10% steps.  With the
 // cable bit (0x10) set, 0–10 = charging, 11 = full, 14/15 = not charging /
-// unknown.  Without battery information, report cabled + full so nothing
-// raises low-battery warnings.
+// unknown (the kernel then shows 0%).  Without battery information, report
+// cabled + full so nothing raises low-battery warnings.
 static std::uint8_t encode_battery(const BatteryInfo& b) {
     constexpr std::uint8_t kCable = 0x10;
     if (b.percent < 0) return kCable | 11;
@@ -168,7 +168,11 @@ static std::uint8_t encode_battery(const BatteryInfo& b) {
     case BatteryStatus::Charging:    return kCable | level;
     case BatteryStatus::Full:        return kCable | 11;
     case BatteryStatus::NotCharging: return kCable | 14;
-    case BatteryStatus::Unknown:     break;
+    case BatteryStatus::Unknown:
+        // hid-playstation reports Unknown at 100% until its first input
+        // report, and at 0% for real error states — keep a known level.
+        if (b.percent > 0) return kCable | level;
+        break;
     }
     return kCable | 15;
 }
@@ -394,10 +398,10 @@ void VirtualDevice::send_report(const DS4InputState& s) {
 
         // Byte 0: bit 7 set = not touching, low 7 bits = tracking ID.
         // Bytes 1–3: two 12-bit coordinates (X then Y), little-endian packed.
-        report[offset]     = (t.active ? 0x00 : 0x80) | (t.id & 0x7F);
-        report[offset + 1] = t.x & 0xFF;
-        report[offset + 2] = ((t.x >> 8) & 0x0F) | ((t.y & 0x0F) << 4);
-        report[offset + 3] = (t.y >> 4) & 0xFF;
+        report[offset]     = static_cast<std::uint8_t>((t.active ? 0x00 : 0x80) | (t.id & 0x7F));
+        report[offset + 1] = static_cast<std::uint8_t>(t.x & 0xFF);
+        report[offset + 2] = static_cast<std::uint8_t>(((t.x >> 8) & 0x0F) | ((t.y & 0x0F) << 4));
+        report[offset + 3] = static_cast<std::uint8_t>((t.y >> 4) & 0xFF);
     }
 
     // ── Dispatch via UHID_INPUT2 ─────────────────────────────────────────────
