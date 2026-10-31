@@ -22,6 +22,13 @@ enum class ControllerModel : std::uint8_t {
     Unknown,
 };
 
+/// Battery state reported by the kernel power_supply for a controller.
+struct BatteryInfo {
+    int  percent = -1;            // 0–100, -1 = unknown
+    bool cable_connected = false;
+    bool full = false;
+};
+
 /// Represents one physical Sony controller attached to the system.
 class InputDevice {
 public:
@@ -66,6 +73,12 @@ public:
 
     /// Read battery percentage (0–100, or -1 on failure).
     [[nodiscard]] int battery_percent() const;
+
+    /// Read this controller's battery level and charging state from sysfs.
+    [[nodiscard]] BatteryInfo battery() const;
+
+    /// Maximum value of an absolute axis, or 0 if the axis is absent.
+    [[nodiscard]] int abs_maximum(std::uint16_t code) const;
 
 private:
     struct Impl;

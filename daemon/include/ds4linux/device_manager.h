@@ -6,6 +6,7 @@
 
 #include <ds4linux/profile.h>
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -19,13 +20,13 @@ struct ControllerSlot {
     std::unique_ptr<InputDevice>   physical_touchpad; // touchpad
     std::unique_ptr<InputDevice>   physical_motion;   // motion sensors
 
-    // Virtual output devices
-    std::unique_ptr<VirtualDevice>   virtual_dev;
-    std::unique_ptr<VirtualTouchpad> virtual_touchpad;
-    std::unique_ptr<VirtualMotion>   virtual_motion;
+    // Virtual output device (UHID DS4 — carries gamepad, touchpad and IMU data)
+    std::unique_ptr<VirtualDevice> virtual_dev;
 
-    // Accumulated DS4 gamepad state (packed into HID report on SYN_REPORT)
+    // Accumulated DS4 state (packed into one HID report per translate pass
+    // in which any physical node delivered a SYN_REPORT)
     DS4InputState ds4_state;
+    std::chrono::steady_clock::time_point next_battery_poll{};
 
     Profile     profile;
     std::string evdev_path;          // gamepad event node path

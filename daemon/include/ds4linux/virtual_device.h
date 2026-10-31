@@ -1,13 +1,21 @@
 #pragma once
-// ds4linux::daemon — Virtual output device (UHID for gamepad, uinput for touchpad/motion)
-// Creates virtual DS4 gamepad via /dev/uhid, producing both event and hidraw nodes.
-// Touchpad and motion sensor devices still use uinput.
+// ds4linux::daemon — Virtual output device (UHID DualShock 4)
+// Creates a virtual DS4 via /dev/uhid, producing both event and hidraw nodes.
+// The kernel DS4 driver creates the touchpad and motion sensor nodes itself
+// from the touch / IMU data carried in the input report.
 
 #include <cstdint>
 #include <memory>
 #include <string>
 
 namespace ds4linux::daemon {
+
+struct TouchPoint {
+    bool active = false;
+    std::uint8_t id = 0;      // 7-bit tracking ID
+    std::uint16_t x = 0;      // DS4 touchpad units (0–kDS4TouchpadMaxX)
+    std::uint16_t y = 0;      // DS4 touchpad units (0–kDS4TouchpadMaxY)
+};
 
 // ── DS4 input state — accumulated from physical DualSense events ─────────────
 
@@ -37,6 +45,21 @@ struct DS4InputState {
 
     std::uint8_t l2 = 0;     // L2 trigger analog (0–255)
     std::uint8_t r2 = 0;     // R2 trigger analog (0–255)
+
+    // Raw DS4 IMU units (see kDS4GyroPerDegS in constants.h)
+    std::int16_t gyro_x = 0;  // pitch
+    std::int16_t gyro_y = 0;  // yaw
+    std::int16_t gyro_z = 0;  // roll
+    std::int16_t accel_x = 0;
+    std::int16_t accel_y = 0;
+    std::int16_t accel_z = 0;
+
+    int  battery_percent = -1;      // 0–100, -1 = unknown
+    bool cable_connected = true;
+    bool battery_full    = false;
+
+    int current_touch_slot = 0;     // evdev MT slot being updated, -1 = ignored
+    TouchPoint touches[2];
 };
 
 // ── Rumble/LED output from applications → forwarded to physical device ───────
@@ -70,46 +93,6 @@ public:
     RumbleOutput process_output();
 
     /// The UHID file descriptor (for epoll registration).
-    [[nodiscard]] int fd() const noexcept;
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-};
-
-/// Creates a virtual touchpad device (multitouch, 2 fingers).
-class VirtualTouchpad {
-public:
-    VirtualTouchpad();
-    ~VirtualTouchpad();
-
-    VirtualTouchpad(const VirtualTouchpad&) = delete;
-    VirtualTouchpad& operator=(const VirtualTouchpad&) = delete;
-    VirtualTouchpad(VirtualTouchpad&&) noexcept;
-    VirtualTouchpad& operator=(VirtualTouchpad&&) noexcept;
-
-    void emit(std::uint16_t type, std::uint16_t code, std::int32_t value);
-    void syn();
-    [[nodiscard]] int fd() const noexcept;
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-};
-
-/// Creates a virtual motion sensor device (gyro + accelerometer).
-class VirtualMotion {
-public:
-    VirtualMotion();
-    ~VirtualMotion();
-
-    VirtualMotion(const VirtualMotion&) = delete;
-    VirtualMotion& operator=(const VirtualMotion&) = delete;
-    VirtualMotion(VirtualMotion&&) noexcept;
-    VirtualMotion& operator=(VirtualMotion&&) noexcept;
-
-    void emit(std::uint16_t type, std::uint16_t code, std::int32_t value);
-    void syn();
     [[nodiscard]] int fd() const noexcept;
 
 private:

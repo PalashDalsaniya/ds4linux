@@ -23,8 +23,9 @@ inline constexpr std::uint16_t kPidDualSenseEdge = 0x0DF2; // DualSense Edge
 
 // ── Virtual device names ─────────────────────────────────────────────────────
 inline constexpr std::string_view kVirtualDS4Name        = "DS4Linux Virtual DS4";
-inline constexpr std::string_view kVirtualDS4TouchpadName = "DS4Linux Virtual DS4 Touchpad";
-inline constexpr std::string_view kVirtualDS4MotionName   = "DS4Linux Virtual DS4 Motion Sensors";
+// UHID phys string of the virtual DS4.  USB-style so it looks like real
+// hardware, but unique so the scanner can recognise and skip its own devices.
+inline constexpr std::string_view kVirtualDS4Phys        = "usb-ds4linux-virtual/input0";
 
 // ── Profile paths ────────────────────────────────────────────────────────────
 inline constexpr std::string_view kConfigDirName     = "ds4linux";
@@ -46,17 +47,16 @@ inline constexpr int kDS4StickMax   = 255;
 inline constexpr int kDS4TriggerMin = 0;
 inline constexpr int kDS4TriggerMax = 255;
 
-// ── DualSense touchpad (from hid-playstation kernel driver) ──────────────────
-inline constexpr int kTouchpadMaxX      = 1919;
-inline constexpr int kTouchpadMaxY      = 1079;
-inline constexpr int kTouchpadMaxSlots  = 2;     // multi-touch: 2 fingers
+// ── Virtual DS4 touchpad (DS4 pad is 1920x942, from hid-sony / hid-playstation) ─
+inline constexpr int kDS4TouchpadMaxX = 1919;
+inline constexpr int kDS4TouchpadMaxY = 941;
 
-// ── DualSense motion sensors (from hid-playstation kernel driver) ────────────
-// Gyroscope: ±2000 deg/s, 16-bit signed → range approx -32768..32767
-inline constexpr int kMotionGyroMin  = -32768;
-inline constexpr int kMotionGyroMax  =  32767;
-// Accelerometer: ±4g, 16-bit signed
-inline constexpr int kMotionAccelMin = -32768;
-inline constexpr int kMotionAccelMax =  32767;
+// ── Virtual DS4 motion sensor scaling ────────────────────────────────────────
+// hid-playstation reports gyro normalised to 1024 units per deg/s and accel to
+// 8192 units per g.  The virtual DS4 reports raw values like real hardware:
+// gyro at 16 units per deg/s (±2048 deg/s in int16) and accel at 8192 per g.
+// The calibration feature report (0x02) encodes exactly these scales.
+inline constexpr int kEvdevGyroPerDegS = 1024;
+inline constexpr int kDS4GyroPerDegS   = 16;
 
 } // namespace ds4linux

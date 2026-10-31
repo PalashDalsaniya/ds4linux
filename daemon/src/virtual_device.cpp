@@ -1,14 +1,15 @@
-// ds4linux::daemon — VirtualDevice (UHID) / VirtualTouchpad / VirtualMotion (uinput)
+// ds4linux::daemon — VirtualDevice (UHID)
 //
 // VirtualDevice: Creates a DS4 v1 HID device via /dev/uhid, forcing the kernel
 // to instantiate both /dev/input/eventX *and* /dev/hidrawX nodes.  This allows
-// Wine/Proton to detect the device as a native DualShock 4 via hidraw.
-//
-// VirtualTouchpad and VirtualMotion remain uinput-based.
+// Wine/Proton to detect the device as a native DualShock 4 via hidraw.  The
+// kernel DS4 driver also creates the touchpad and motion sensor event nodes
+// from the touch / IMU fields of the input report.
 
 #include "ds4linux/virtual_device.h"
 #include "ds4linux/constants.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -18,8 +19,6 @@
 #include <linux/input.h>
 #include <poll.h>
 #include <linux/uhid.h>
-#include <linux/uinput.h>
-#include <stdexcept>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
@@ -100,47 +99,51 @@ static std::uint8_t encode_dpad(int hat_x, int hat_y) {
     return table[hat_y + 1][hat_x + 1];
 }
 
+static void put_le16(std::uint8_t* buf, std::size_t off, std::int16_t v) {
+    buf[off]     = static_cast<std::uint8_t>(v & 0xFF);
+    buf[off + 1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
+}
+
 // ── Feature report helpers ───────────────────────────────────────────────────
-// Build default calibration data (report 0x02, 37 bytes).
-// Provides neutral biases and unity-gain scale so hid-sony initialises cleanly.
+// Build calibration data (report 0x02, 37 bytes).
+//
+// The kernel DS4 driver scales raw gyro by
+//   (speed+ + speed-) * 1024 / (axis+ - axis-)
+// and raw accel by 2 * 8192 / (axis+ - axis-) around the midpoint.  The values
+// below mimic real hardware: gyro at kDS4GyroPerDegS raw units per deg/s and
+// accel at 8192 raw units per g, so each 16-bit raw value maps cleanly back
+// to the kernel's normalised units.
 
 static void build_calibration_report(std::uint8_t* buf, std::size_t size) {
     std::memset(buf, 0, size);
     buf[0] = 0x02; // report ID
 
-    // Gyro bias: all zero (no offset)
-    // Gyro plus/minus speed: ±8192 (default scale)
-    auto put_le16 = [&](std::size_t off, std::int16_t v) {
-        buf[off]     = static_cast<std::uint8_t>(v & 0xFF);
-        buf[off + 1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
-    };
     // Offsets within the 37-byte report (after report ID byte):
-    //  1-2: gyro pitch bias  = 0
-    //  3-4: gyro yaw bias    = 0
-    //  5-6: gyro roll bias   = 0
-    //  7-8:  gyro pitch +    =  8192
-    //  9-10: gyro pitch -    = -8192
-    // 11-12: gyro yaw +      =  8192
-    // 13-14: gyro yaw -      = -8192
-    // 15-16: gyro roll +     =  8192
-    // 17-18: gyro roll -     = -8192
-    // 19-20: gyro speed +    =  8192
-    // 21-22: gyro speed -    =  8192
-    // 23-24: accel X +       =  8192
-    // 25-26: accel X -       = -8192
-    // 27-28: accel Y +       =  8192
-    // 29-30: accel Y -       = -8192
-    // 31-32: accel Z +       =  8192
-    // 33-34: accel Z -       = -8192
-    constexpr std::int16_t pos =  8192;
-    constexpr std::int16_t neg = -8192;
-    put_le16( 7, pos);  put_le16( 9, neg);
-    put_le16(11, pos);  put_le16(13, neg);
-    put_le16(15, pos);  put_le16(17, neg);
-    put_le16(19, pos);  put_le16(21, pos);
-    put_le16(23, pos);  put_le16(25, neg);
-    put_le16(27, pos);  put_le16(29, neg);
-    put_le16(31, pos);  put_le16(33, neg);
+    //  1-6:   gyro pitch / yaw / roll bias = 0
+    //  7-18:  gyro pitch / yaw / roll +/-  = ±gyro_range
+    // 19-22:  gyro speed +/-               =  gyro_speed
+    // 23-34:  accel X / Y / Z +/-          = ±8192
+    constexpr std::int16_t gyro_speed = 540;  // typical DS4 value
+    constexpr std::int16_t gyro_range = gyro_speed * kDS4GyroPerDegS;
+    constexpr std::int16_t accel_1g   = 8192;
+    for (std::size_t off : {7, 11, 15}) {
+        put_le16(buf, off,      gyro_range);
+        put_le16(buf, off + 2, -gyro_range);
+    }
+    put_le16(buf, 19, gyro_speed);
+    put_le16(buf, 21, gyro_speed);
+    for (std::size_t off : {23, 27, 31}) {
+        put_le16(buf, off,      accel_1g);
+        put_le16(buf, off + 2, -accel_1g);
+    }
+}
+
+// DS4 report timestamps tick in units of 16/3 µs (5.33 µs) and wrap at 16 bits.
+static std::uint16_t ds4_timestamp_now() {
+    using namespace std::chrono;
+    auto us = duration_cast<microseconds>(
+        steady_clock::now().time_since_epoch()).count();
+    return static_cast<std::uint16_t>((static_cast<std::uint64_t>(us) * 3) / 16);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -149,7 +152,8 @@ static void build_calibration_report(std::uint8_t* buf, std::size_t size) {
 
 struct VirtualDevice::Impl {
     int fd = -1;
-    std::uint8_t counter = 0; // 6-bit frame counter
+    std::uint8_t counter = 0;       // 6-bit frame counter
+    std::uint8_t touch_counter = 0; // touch packet timestamp
 
     // Permanent background thread variables
     std::atomic<bool> running{false};
@@ -191,7 +195,7 @@ VirtualDevice::VirtualDevice()
                  "Sony Computer Entertainment Wireless Controller",
                  sizeof(cr.name) - 1);
     std::strncpy(reinterpret_cast<char*>(cr.phys),
-                 "ds4linux/virtual",
+                 std::string(kVirtualDS4Phys).c_str(),
                  sizeof(cr.phys) - 1);
     std::strncpy(reinterpret_cast<char*>(cr.uniq),
                  "30:0e:d5:89:8c:29",
@@ -263,9 +267,14 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     //  Byte  7: [PS:1] [Touchpad:1] [Counter:6]
     //  Byte  8: L2 trigger analog (0–255)
     //  Byte  9: R2 trigger analog (0–255)
-    //  Bytes 10–11: Timestamp (uint16_t LE, increments)
-    //  Byte  12: Battery level
-    //  Bytes 13–63: IMU, touchpad, vendor data (zeroed)
+    //  Bytes 10–11: Timestamp (uint16_t LE, 5.33 µs units)
+    //  Byte  12: Sensor temperature (unused)
+    //  Bytes 13–18: Gyro pitch / yaw / roll (int16 LE)
+    //  Bytes 19–24: Accel X / Y / Z (int16 LE)
+    //  Byte  30: [Cable:1 @ bit 4] [Battery level:4]
+    //  Byte  33: Number of touch packets
+    //  Byte  34: Touch packet timestamp
+    //  Bytes 35–38: Touch point 0, Bytes 39–42: Touch point 1
 
     std::uint8_t report[kDS4ReportSize]{};
 
@@ -305,21 +314,43 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     report[8] = s.l2;
     report[9] = s.r2;
 
-    // Timestamp (simple incrementing — hid-sony uses this for jitter filtering)
-    static std::uint16_t ts = 0;
-    ts += 188; // ~5.33 ms at USB poll rate
-    report[10] = static_cast<std::uint8_t>(ts & 0xFF);
-    report[11] = static_cast<std::uint8_t>((ts >> 8) & 0xFF);
+    put_le16(report, 10, static_cast<std::int16_t>(ds4_timestamp_now()));
 
-    // Battery level: report as charged USB (0x0B = full, cable connected)
-    report[12] = 0x0B;
+    // IMU
+    put_le16(report, 13, s.gyro_x);
+    put_le16(report, 15, s.gyro_y);
+    put_le16(report, 17, s.gyro_z);
+    put_le16(report, 19, s.accel_x);
+    put_le16(report, 21, s.accel_y);
+    put_le16(report, 23, s.accel_z);
 
-    // Touchpad: no active touches — set inactive flags
-    // Byte 33: number of touch reports = 0
-    // Byte 34: touch 0 — contact bit clear, ID 0 (0x80 = inactive)
-    report[33] = 0; // touch report count
-    report[34] = 0x80;
-    report[38] = 0x80;
+    // ── Byte 30: Battery level & cable state ─────────────────────────────────
+    // Level 0–10 is 0–100% in steps of 10.  With the cable bit (0x10) set,
+    // 0–10 means charging and 11 means full.  Unknown battery → cabled + full.
+    std::uint8_t level;
+    if (s.battery_percent < 0 || (s.cable_connected && s.battery_full)) {
+        level = 11;
+    } else {
+        level = static_cast<std::uint8_t>(std::min(s.battery_percent / 10, 10));
+    }
+    bool cable = s.cable_connected || s.battery_percent < 0;
+    report[30] = (cable ? 0x10 : 0x00) | (level & 0x0F);
+
+    // ── Bytes 33–42: Touchpad (one packet, two touch points) ─────────────────
+    report[33] = 1;
+    report[34] = impl_->touch_counter++;
+
+    for (int i = 0; i < 2; ++i) {
+        const std::size_t offset = 35 + (i * 4);
+        const auto& t = s.touches[i];
+
+        // Byte 0: bit 7 set = not touching, low 7 bits = tracking ID.
+        // Bytes 1–3: two 12-bit coordinates (X then Y), little-endian packed.
+        report[offset]     = (t.active ? 0x00 : 0x80) | (t.id & 0x7F);
+        report[offset + 1] = t.x & 0xFF;
+        report[offset + 2] = ((t.x >> 8) & 0x0F) | ((t.y & 0x0F) << 4);
+        report[offset + 3] = (t.y >> 4) & 0xFF;
+    }
 
     // ── Dispatch via UHID_INPUT2 ─────────────────────────────────────────────
     struct uhid_event ev{};
@@ -494,212 +525,5 @@ RumbleOutput VirtualDevice::process_output() {
     }
     return result;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Shared uinput helpers (for VirtualTouchpad / VirtualMotion only)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static int open_uinput() {
-    int fd = ::open("/dev/uinput", O_RDWR | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0) {
-        throw std::system_error(errno, std::system_category(),
-                                "Failed to open /dev/uinput");
-    }
-    return fd;
-}
-
-static void create_device(int fd, struct uinput_setup& setup) {
-    if (::ioctl(fd, UI_DEV_SETUP, &setup) < 0) {
-        throw std::system_error(errno, std::system_category(),
-                                "UI_DEV_SETUP failed");
-    }
-    if (::ioctl(fd, UI_DEV_CREATE) < 0) {
-        throw std::system_error(errno, std::system_category(),
-                                "UI_DEV_CREATE failed");
-    }
-}
-
-static void emit_event(int fd, std::uint16_t type, std::uint16_t code,
-                        std::int32_t value) {
-    struct input_event ev{};
-    ev.type  = type;
-    ev.code  = code;
-    ev.value = value;
-    [[maybe_unused]] auto _ = ::write(fd, &ev, sizeof(ev));
-}
-
-static std::string get_device_node(int fd) {
-    char sysname[64]{};
-    if (::ioctl(fd, UI_GET_SYSNAME(sizeof(sysname)), sysname) >= 0) {
-        return std::string("/dev/input/") + sysname;
-    }
-    return {};
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// VirtualTouchpad — DS4 touchpad (multitouch, 2 finger slots)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-struct VirtualTouchpad::Impl {
-    int fd = -1;
-    ~Impl() {
-        if (fd >= 0) { ::ioctl(fd, UI_DEV_DESTROY); ::close(fd); }
-    }
-};
-
-VirtualTouchpad::VirtualTouchpad()
-    : impl_(std::make_unique<Impl>())
-{
-    impl_->fd = open_uinput();
-
-    // ── Buttons ──────────────────────────────────────────────────────────────
-    ::ioctl(impl_->fd, UI_SET_EVBIT, EV_KEY);
-    ::ioctl(impl_->fd, UI_SET_KEYBIT, BTN_LEFT);           // touchpad click
-    ::ioctl(impl_->fd, UI_SET_KEYBIT, BTN_TOUCH);          // finger contact
-    ::ioctl(impl_->fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);    // 1 finger
-    ::ioctl(impl_->fd, UI_SET_KEYBIT, BTN_TOOL_DOUBLETAP); // 2 fingers
-
-    // ── Axes ─────────────────────────────────────────────────────────────────
-    ::ioctl(impl_->fd, UI_SET_EVBIT, EV_ABS);
-    struct uinput_abs_setup abs{};
-
-    // Single-touch (Type A fallback): ABS_X, ABS_Y
-    for (auto axis : {ABS_X, ABS_Y}) {
-        std::memset(&abs, 0, sizeof(abs));
-        abs.code            = static_cast<__u16>(axis);
-        abs.absinfo.minimum = 0;
-        abs.absinfo.maximum = (axis == ABS_X) ? kTouchpadMaxX : kTouchpadMaxY;
-        abs.absinfo.resolution = (axis == ABS_X) ? 44 : 41;
-        ::ioctl(impl_->fd, UI_ABS_SETUP, &abs);
-    }
-
-    // Multi-touch slot
-    std::memset(&abs, 0, sizeof(abs));
-    abs.code            = ABS_MT_SLOT;
-    abs.absinfo.minimum = 0;
-    abs.absinfo.maximum = kTouchpadMaxSlots - 1;
-    ::ioctl(impl_->fd, UI_ABS_SETUP, &abs);
-
-    // MT position
-    std::memset(&abs, 0, sizeof(abs));
-    abs.code            = ABS_MT_POSITION_X;
-    abs.absinfo.minimum = 0;
-    abs.absinfo.maximum = kTouchpadMaxX;
-    abs.absinfo.resolution = 44;
-    ::ioctl(impl_->fd, UI_ABS_SETUP, &abs);
-
-    std::memset(&abs, 0, sizeof(abs));
-    abs.code            = ABS_MT_POSITION_Y;
-    abs.absinfo.minimum = 0;
-    abs.absinfo.maximum = kTouchpadMaxY;
-    abs.absinfo.resolution = 41;
-    ::ioctl(impl_->fd, UI_ABS_SETUP, &abs);
-
-    // MT tracking ID (-1 = released, 0+ = finger id)
-    std::memset(&abs, 0, sizeof(abs));
-    abs.code            = ABS_MT_TRACKING_ID;
-    abs.absinfo.minimum = -1;
-    abs.absinfo.maximum = 65535;
-    ::ioctl(impl_->fd, UI_ABS_SETUP, &abs);
-
-    // ── Properties ───────────────────────────────────────────────────────────
-    ::ioctl(impl_->fd, UI_SET_PROPBIT, INPUT_PROP_POINTER);
-    ::ioctl(impl_->fd, UI_SET_PROPBIT, INPUT_PROP_BUTTONPAD);
-
-    // ── Device identity ──────────────────────────────────────────────────────
-    struct uinput_setup setup{};
-    setup.id.bustype = BUS_VIRTUAL;
-    setup.id.vendor  = kVidSony;
-    setup.id.product = kPidDS4v2;
-    setup.id.version = 0x0100;
-    std::strncpy(setup.name, std::string(kVirtualDS4TouchpadName).c_str(),
-                 UINPUT_MAX_NAME_SIZE - 1);
-
-    create_device(impl_->fd, setup);
-    std::cout << "[ds4linux] Virtual DS4 touchpad created: "
-              << get_device_node(impl_->fd) << "\n";
-}
-
-VirtualTouchpad::~VirtualTouchpad() = default;
-VirtualTouchpad::VirtualTouchpad(VirtualTouchpad&&) noexcept = default;
-VirtualTouchpad& VirtualTouchpad::operator=(VirtualTouchpad&&) noexcept = default;
-
-void VirtualTouchpad::emit(std::uint16_t type, std::uint16_t code, std::int32_t value) {
-    emit_event(impl_->fd, type, code, value);
-}
-void VirtualTouchpad::syn() { emit_event(impl_->fd, EV_SYN, SYN_REPORT, 0); }
-int VirtualTouchpad::fd() const noexcept { return impl_->fd; }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// VirtualMotion — DS4 motion sensors (gyro + accel)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-struct VirtualMotion::Impl {
-    int fd = -1;
-    ~Impl() {
-        if (fd >= 0) { ::ioctl(fd, UI_DEV_DESTROY); ::close(fd); }
-    }
-};
-
-VirtualMotion::VirtualMotion()
-    : impl_(std::make_unique<Impl>())
-{
-    impl_->fd = open_uinput();
-
-    // ── Axes: accel (ABS_X, ABS_Y, ABS_Z) + gyro (ABS_RX, ABS_RY, ABS_RZ)
-    ::ioctl(impl_->fd, UI_SET_EVBIT, EV_ABS);
-    struct uinput_abs_setup abs{};
-
-    // Accelerometer
-    for (auto axis : {ABS_X, ABS_Y, ABS_Z}) {
-        std::memset(&abs, 0, sizeof(abs));
-        abs.code              = static_cast<__u16>(axis);
-        abs.absinfo.minimum   = kMotionAccelMin;
-        abs.absinfo.maximum   = kMotionAccelMax;
-        abs.absinfo.fuzz      = 0;
-        abs.absinfo.flat      = 0;
-        abs.absinfo.resolution = 8192;
-        ::ioctl(impl_->fd, UI_ABS_SETUP, &abs);
-    }
-
-    // Gyroscope
-    for (auto axis : {ABS_RX, ABS_RY, ABS_RZ}) {
-        std::memset(&abs, 0, sizeof(abs));
-        abs.code              = static_cast<__u16>(axis);
-        abs.absinfo.minimum   = kMotionGyroMin;
-        abs.absinfo.maximum   = kMotionGyroMax;
-        abs.absinfo.fuzz      = 0;
-        abs.absinfo.flat      = 0;
-        abs.absinfo.resolution = 1024;
-        ::ioctl(impl_->fd, UI_ABS_SETUP, &abs);
-    }
-
-    // MSC for timestamp
-    ::ioctl(impl_->fd, UI_SET_EVBIT, EV_MSC);
-    ::ioctl(impl_->fd, UI_SET_MSCBIT, MSC_TIMESTAMP);
-
-    // ── Device identity ──────────────────────────────────────────────────────
-    struct uinput_setup setup{};
-    setup.id.bustype = BUS_VIRTUAL;
-    setup.id.vendor  = kVidSony;
-    setup.id.product = kPidDS4v2;
-    setup.id.version = 0x0100;
-    std::strncpy(setup.name, std::string(kVirtualDS4MotionName).c_str(),
-                 UINPUT_MAX_NAME_SIZE - 1);
-
-    create_device(impl_->fd, setup);
-    std::cout << "[ds4linux] Virtual DS4 motion sensors created: "
-              << get_device_node(impl_->fd) << "\n";
-}
-
-VirtualMotion::~VirtualMotion() = default;
-VirtualMotion::VirtualMotion(VirtualMotion&&) noexcept = default;
-VirtualMotion& VirtualMotion::operator=(VirtualMotion&&) noexcept = default;
-
-void VirtualMotion::emit(std::uint16_t type, std::uint16_t code, std::int32_t value) {
-    emit_event(impl_->fd, type, code, value);
-}
-void VirtualMotion::syn() { emit_event(impl_->fd, EV_SYN, SYN_REPORT, 0); }
-int VirtualMotion::fd() const noexcept { return impl_->fd; }
 
 } // namespace ds4linux::daemon

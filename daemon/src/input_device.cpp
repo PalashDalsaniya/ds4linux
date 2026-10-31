@@ -253,21 +253,38 @@ bool InputDevice::set_rumble(std::uint8_t heavy, std::uint8_t light) {
 }
 
 int InputDevice::battery_percent() const {
-    // Try reading from power_supply sysfs
-    // /sys/class/power_supply/sony_controller_battery_*/capacity
-    for (const auto& entry : fs::directory_iterator("/sys/class/power_supply")) {
-        auto name = entry.path().filename().string();
-        if (name.find("sony") == std::string::npos &&
-            name.find("ps-controller") == std::string::npos) continue;
+    return battery().percent;
+}
 
-        auto cap_path = entry.path() / "capacity";
-        if (!fs::exists(cap_path)) continue;
+BatteryInfo InputDevice::battery() const {
+    // The kernel registers the battery under this controller's HID device:
+    // /sys/class/input/eventX/device/device/power_supply/<name>/{capacity,status}
+    BatteryInfo info;
+    auto event_name = fs::path(impl_->evdev_path_).filename();
+    fs::path supplies = fs::path("/sys/class/input") / event_name /
+                        "device" / "device" / "power_supply";
 
-        std::ifstream ifs(cap_path);
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(supplies, ec)) {
+        std::ifstream cap(entry.path() / "capacity");
         int pct = -1;
-        if (ifs >> pct) return pct;
+        if (!(cap >> pct)) continue;
+        info.percent = pct;
+
+        std::ifstream st(entry.path() / "status");
+        std::string status;
+        if (st >> status) {
+            info.cable_connected = (status != "Discharging");
+            info.full = (status == "Full");
+        }
+        break;
     }
-    return -1;
+    return info;
+}
+
+int InputDevice::abs_maximum(std::uint16_t code) const {
+    const auto* abs = libevdev_get_abs_info(impl_->dev, code);
+    return abs ? abs->maximum : 0;
 }
 
 } // namespace ds4linux::daemon

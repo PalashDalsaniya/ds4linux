@@ -3,6 +3,7 @@
 #include "ds4linux/device_manager.h"
 #include "ds4linux/constants.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -117,6 +118,22 @@ static std::string get_physical_id(const std::string& evdev_path) {
     }
 }
 
+/// True if the evdev node belongs to one of our own UHID virtual DS4s.
+/// hid-sony copies the UHID phys string onto its input nodes, but
+/// hid-playstation (kernel 6.2+) leaves phys empty, so also match on the HID
+/// device living under the uhid misc device with a USB bus type.  Bluetooth
+/// controllers handled by bluetoothd also sit under uhid, but with BUS_BLUETOOTH.
+static bool is_own_virtual_node(int fd, const struct input_id& id,
+                                const std::string& physical_id) {
+    char phys_buf[256] = {};
+    if (::ioctl(fd, EVIOCGPHYS(sizeof(phys_buf)), phys_buf) >= 0 &&
+        std::string_view(phys_buf).starts_with(kVirtualDS4Phys)) {
+        return true;
+    }
+    return id.bustype == BUS_USB &&
+           physical_id.starts_with("/sys/devices/virtual/misc/uhid/");
+}
+
 // ── Scanning ─────────────────────────────────────────────────────────────────
 
 void DeviceManager::scan() {
@@ -162,22 +179,19 @@ void DeviceManager::scan() {
             char name_buf[256] = {};
             ::ioctl(fd, EVIOCGNAME(sizeof(name_buf)), name_buf);
 
-            // Skip our own virtual devices using the custom phys string
-            char phys_buf[256] = {};
-            if (::ioctl(fd, EVIOCGPHYS(sizeof(phys_buf)), phys_buf) >= 0) {
-                std::string dev_phys(phys_buf);
-                if (dev_phys == "ds4linux/virtual") {
-                    ::close(fd);
-                    continue;
-                }
+            auto phys_id = get_physical_id(entry.path().string());
+
+            // Skip our own virtual devices (gamepad, touchpad and motion nodes
+            // the kernel DS4 driver creates for the UHID device)
+            if (is_own_virtual_node(fd, id, phys_id)) {
+                ::close(fd);
+                continue;
             }
 
             NodeInfo::Type type = NodeInfo::Other;
             if (is_gamepad_node(fd))       type = NodeInfo::Gamepad;
             else if (is_touchpad_node(fd)) type = NodeInfo::Touchpad;
             else if (is_motion_node(fd))   type = NodeInfo::Motion;
-
-            auto phys_id = get_physical_id(entry.path().string());
 
             const char* type_str = "other";
             if (type == NodeInfo::Gamepad)  type_str = "gamepad";
@@ -225,8 +239,6 @@ void DeviceManager::scan() {
                 try {
                     it->second.physical_touchpad =
                         std::make_unique<InputDevice>(tp_path, /*grab=*/true);
-                    it->second.virtual_touchpad =
-                        std::make_unique<VirtualTouchpad>();
                     std::cout << "[ds4linux] Touchpad active: " << tp_path << "\n";
                 } catch (const std::exception& ex) {
                     std::cerr << "[ds4linux] Could not open touchpad "
@@ -238,8 +250,6 @@ void DeviceManager::scan() {
                 try {
                     it->second.physical_motion =
                         std::make_unique<InputDevice>(mo_path, /*grab=*/true);
-                    it->second.virtual_motion =
-                        std::make_unique<VirtualMotion>();
                     std::cout << "[ds4linux] Motion sensors active: " << mo_path << "\n";
                 } catch (const std::exception& ex) {
                     std::cerr << "[ds4linux] Could not open motion "
@@ -260,6 +270,15 @@ void DeviceManager::scan() {
 
 void DeviceManager::on_device_added(const std::string& evdev_path) {
     if (slots_.count(evdev_path)) return;
+
+    int fd = ::open(evdev_path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return;
+    struct input_id id{};
+    bool own = ::ioctl(fd, EVIOCGID, &id) >= 0 &&
+               is_own_virtual_node(fd, id, get_physical_id(evdev_path));
+    ::close(fd);
+    if (own) return;
+
     open_slot(evdev_path);
 }
 
@@ -269,12 +288,28 @@ void DeviceManager::on_device_removed(const std::string& evdev_path) {
 
 // ── Translate loop ───────────────────────────────────────────────────────────
 
+static std::int16_t clamp_i16(std::int32_t v) {
+    return static_cast<std::int16_t>(std::clamp<std::int32_t>(v, -32768, 32767));
+}
+
+/// Rescale a touch coordinate from the physical pad's range to the DS4 pad's.
+static std::uint16_t scale_touch(std::int32_t v, int src_max, int dst_max) {
+    if (src_max <= 0) src_max = dst_max;
+    std::int64_t scaled = static_cast<std::int64_t>(v) * dst_max / src_max;
+    return static_cast<std::uint16_t>(std::clamp<std::int64_t>(scaled, 0, dst_max));
+}
+
+static constexpr auto kBatteryPollInterval = std::chrono::seconds(5);
+
 void DeviceManager::translate_events() {
     // The translation strategy for the UHID path:
     //   1. Read evdev events from the physical DualSense (hid-playstation driver).
-    //   2. Accumulate them into the per-slot DS4InputState.
-    //   3. On SYN_REPORT, pack the state into a DS4 HID input report and
-    //      dispatch it to the kernel via UHID_INPUT2.
+    //   2. Accumulate gamepad, touchpad and motion events into the per-slot
+    //      DS4InputState.
+    //   3. If any of those nodes delivered a SYN_REPORT, pack the state into
+    //      one DS4 HID input report and dispatch it via UHID_INPUT2.  The
+    //      motion node syncs on every controller report, so the virtual DS4
+    //      runs at the physical controller's report rate.
     //
     // Physical DualSense evdev codes (hid-playstation):
     //   BTN_SOUTH=Cross, BTN_EAST=Circle, BTN_NORTH=Triangle, BTN_WEST=Square
@@ -286,6 +321,8 @@ void DeviceManager::translate_events() {
     //   ABS_HAT0X=D-pad X, ABS_HAT0Y=D-pad Y
 
     for (auto& [path, slot] : slots_) {
+        bool dirty = false;
+
         // ── Gamepad events (physical → DS4 HID report) ──────────────────
         if (slot.physical && slot.virtual_dev) {
             bool ok = slot.physical->read_events(
@@ -323,8 +360,7 @@ void DeviceManager::translate_events() {
                         default: break;
                         }
                     } else if (type == EV_SYN && code == SYN_REPORT) {
-                        // Flush: pack accumulated state and send HID report
-                        slot.virtual_dev->send_report(s);
+                        dirty = true;
                     }
                 }
             );
@@ -346,30 +382,83 @@ void DeviceManager::translate_events() {
             }
         }
 
-        // ── Touchpad events (pass through directly via uinput) ──────────
-        if (slot.physical_touchpad && slot.virtual_touchpad) {
+        // ── Touchpad events (physical → DS4 report touch points) ────────
+        if (slot.physical_touchpad) {
+            const int src_max_x = slot.physical_touchpad->abs_maximum(ABS_MT_POSITION_X);
+            const int src_max_y = slot.physical_touchpad->abs_maximum(ABS_MT_POSITION_Y);
             slot.physical_touchpad->read_events(
                 [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
-                    if (type == EV_SYN) {
-                        slot.virtual_touchpad->syn();
-                    } else {
-                        slot.virtual_touchpad->emit(type, code, value);
+                    auto& s = slot.ds4_state;
+
+                    if (type == EV_ABS) {
+                        if (code == ABS_MT_SLOT) {
+                            // The DS4 report only has two touch points
+                            s.current_touch_slot = (value >= 0 && value < 2) ? value : -1;
+                            return;
+                        }
+                        if (s.current_touch_slot < 0) return;
+                        auto& t = s.touches[s.current_touch_slot];
+                        switch (code) {
+                        case ABS_MT_TRACKING_ID:
+                            t.active = (value != -1);
+                            if (t.active) t.id = static_cast<std::uint8_t>(value & 0x7F);
+                            break;
+                        case ABS_MT_POSITION_X:
+                            t.x = scale_touch(value, src_max_x, kDS4TouchpadMaxX);
+                            break;
+                        case ABS_MT_POSITION_Y:
+                            t.y = scale_touch(value, src_max_y, kDS4TouchpadMaxY);
+                            break;
+                        default: break;
+                        }
+                    } else if (type == EV_KEY && code == BTN_LEFT) {
+                        // BTN_LEFT on the touchpad node is the touchpad click
+                        s.touchpad = (value != 0);
+                    } else if (type == EV_SYN && code == SYN_REPORT) {
+                        dirty = true;
                     }
                 }
             );
         }
 
-        // ── Motion events (pass through directly via uinput) ────────────
-        if (slot.physical_motion && slot.virtual_motion) {
+        // ── Motion events (physical → DS4 report IMU fields) ────────────
+        if (slot.physical_motion) {
             slot.physical_motion->read_events(
                 [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
-                    if (type == EV_SYN) {
-                        slot.virtual_motion->syn();
-                    } else {
-                        slot.virtual_motion->emit(type, code, value);
+                    auto& s = slot.ds4_state;
+                    if (type == EV_ABS) {
+                        // hid-playstation values are normalised; convert back
+                        // to raw DS4 units (see constants.h)
+                        constexpr int gyro_div = kEvdevGyroPerDegS / kDS4GyroPerDegS;
+                        switch (code) {
+                        case ABS_X:  s.accel_x = clamp_i16(value); break;
+                        case ABS_Y:  s.accel_y = clamp_i16(value); break;
+                        case ABS_Z:  s.accel_z = clamp_i16(value); break;
+                        case ABS_RX: s.gyro_x  = clamp_i16(value / gyro_div); break;
+                        case ABS_RY: s.gyro_y  = clamp_i16(value / gyro_div); break;
+                        case ABS_RZ: s.gyro_z  = clamp_i16(value / gyro_div); break;
+                        default: break;
+                        }
+                    } else if (type == EV_SYN && code == SYN_REPORT) {
+                        dirty = true;
                     }
                 }
             );
+        }
+
+        // ── Battery (polled from sysfs) ─────────────────────────────────
+        auto now = std::chrono::steady_clock::now();
+        if (slot.physical && now >= slot.next_battery_poll) {
+            slot.next_battery_poll = now + kBatteryPollInterval;
+            auto bat = slot.physical->battery();
+            auto& s = slot.ds4_state;
+            s.battery_percent = bat.percent;
+            s.cable_connected = bat.cable_connected;
+            s.battery_full    = bat.full;
+        }
+
+        if (dirty && slot.virtual_dev) {
+            slot.virtual_dev->send_report(slot.ds4_state);
         }
     }
 }
