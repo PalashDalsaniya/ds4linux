@@ -1,11 +1,13 @@
 [Unit]
 Description=DS4Linux — Sony Controller Bridge Daemon
-Documentation=https://github.com/ds4linux/ds4linux
+Documentation=https://github.com/PalashDalsaniya/ds4linux
 After=systemd-udevd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ds4linux-daemon
+# Extra daemon options (e.g. DS4LINUX_ARGS=--generic) go in /etc/default/ds4linux
+EnvironmentFile=-/etc/default/ds4linux
+ExecStart=/usr/bin/ds4linux-daemon $DS4LINUX_ARGS
 Restart=on-failure
 RestartSec=3
 
@@ -16,12 +18,13 @@ PrivateTmp=yes
 NoNewPrivileges=no
 ReadWritePaths=/run
 
-# The daemon needs access to /dev/input, /dev/uinput, /dev/hidraw*
-DeviceAllow=/dev/input/*  rw
-DeviceAllow=/dev/uinput   rw
-DeviceAllow=/dev/hidraw*  rw
+# The daemon needs the evdev and hidraw nodes plus /dev/uhid.  Device globs
+# are not supported here, so allow the whole input and hidraw device classes.
+DeviceAllow=char-input  rw
+DeviceAllow=char-hidraw rw
+DeviceAllow=/dev/uhid   rw
 
-# Run as root (needed for EVIOCGRAB + uinput)
+# Run as root (needed for EVIOCGRAB + uhid)
 User=root
 Group=root
 

@@ -19,14 +19,37 @@ enum class ControllerModel : std::uint8_t {
     DS4v2,
     DualSense,
     DualSenseEdge,
+    Generic,        // any other evdev gamepad (opt-in, see --generic)
+};
+
+/// Charging state as reported by the kernel power_supply "status" attribute.
+enum class BatteryStatus : std::uint8_t {
     Unknown,
+    Charging,
+    Discharging,
+    NotCharging,   // cable connected but not charging (e.g. temperature fault)
+    Full,
 };
 
 /// Battery state reported by the kernel power_supply for a controller.
 struct BatteryInfo {
-    int  percent = -1;            // 0–100, -1 = unknown
-    bool cable_connected = false;
-    bool full = false;
+    int           percent = -1;   // 0–100, -1 = no battery information
+    BatteryStatus status  = BatteryStatus::Unknown;
+};
+
+/// Range of an absolute axis.  `present` is false if the device lacks it.
+struct AbsRange {
+    bool present = false;
+    int  minimum = 0;
+    int  maximum = 0;
+    int  resolution = 0;
+};
+
+/// One multitouch contact as currently tracked by libevdev.
+struct MtContact {
+    int tracking_id = -1;         // -1 = no contact in this slot
+    int x = 0;
+    int y = 0;
 };
 
 /// Represents one physical Sony controller attached to the system.
@@ -77,10 +100,23 @@ public:
     /// Read this controller's battery level and charging state from sysfs.
     [[nodiscard]] BatteryInfo battery() const;
 
-    /// Maximum value of an absolute axis, or 0 if the axis is absent.
-    [[nodiscard]] int abs_maximum(std::uint16_t code) const;
+    /// Range of an absolute axis.
+    [[nodiscard]] AbsRange abs_range(std::uint16_t code) const;
+
+    /// Whether the device advertises an event code (e.g. EV_KEY / BTN_TL2).
+    [[nodiscard]] bool has_event_code(std::uint16_t type, std::uint16_t code) const;
+
+    /// Current state of a multitouch slot, as tracked by libevdev from the
+    /// events read so far (including SYN_DROPPED resyncs).
+    [[nodiscard]] MtContact mt_contact(int slot) const;
+
+    /// The device's unique ID (MAC for Sony controllers), may be empty.
+    [[nodiscard]] std::string uniq() const;
 
 private:
+    bool send_ds4_output();
+    bool send_ff_rumble(std::uint8_t heavy, std::uint8_t light);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

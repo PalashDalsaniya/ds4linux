@@ -10,7 +10,9 @@
 #include "ds4linux/constants.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdio>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -19,6 +21,8 @@
 #include <linux/input.h>
 #include <poll.h>
 #include <linux/uhid.h>
+#include <mutex>
+#include <sys/eventfd.h>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
@@ -125,7 +129,7 @@ static void build_calibration_report(std::uint8_t* buf, std::size_t size) {
     // 23-34:  accel X / Y / Z +/-          = ±8192
     constexpr std::int16_t gyro_speed = 540;  // typical DS4 value
     constexpr std::int16_t gyro_range = gyro_speed * kDS4GyroPerDegS;
-    constexpr std::int16_t accel_1g   = 8192;
+    constexpr std::int16_t accel_1g   = kDS4AccelPerG;
     for (std::size_t off : {7, 11, 15}) {
         put_le16(buf, off,      gyro_range);
         put_le16(buf, off + 2, -gyro_range);
@@ -138,12 +142,35 @@ static void build_calibration_report(std::uint8_t* buf, std::size_t size) {
     }
 }
 
-// DS4 report timestamps tick in units of 16/3 µs (5.33 µs) and wrap at 16 bits.
-static std::uint16_t ds4_timestamp_now() {
+// DS4 report timestamps tick in units of 16/3 µs (5.33 µs) and wrap at 16
+// bits.  Because 2^32 * 3 / 16 is a multiple of 2^16, converting a wrapping
+// 32-bit µs counter this way stays continuous across its wrap too.
+static std::uint16_t ds4_timestamp(std::uint64_t us) {
+    return static_cast<std::uint16_t>((us * 3) / 16);
+}
+
+static std::uint64_t steady_now_us() {
     using namespace std::chrono;
-    auto us = duration_cast<microseconds>(
-        steady_clock::now().time_since_epoch()).count();
-    return static_cast<std::uint16_t>((static_cast<std::uint64_t>(us) * 3) / 16);
+    return static_cast<std::uint64_t>(duration_cast<microseconds>(
+        steady_clock::now().time_since_epoch()).count());
+}
+
+// Kernel DS4 battery byte: low nibble 0–10 = level in 10% steps.  With the
+// cable bit (0x10) set, 0–10 = charging, 11 = full, 14/15 = not charging /
+// unknown.  Without battery information, report cabled + full so nothing
+// raises low-battery warnings.
+static std::uint8_t encode_battery(const BatteryInfo& b) {
+    constexpr std::uint8_t kCable = 0x10;
+    if (b.percent < 0) return kCable | 11;
+    auto level = static_cast<std::uint8_t>(std::clamp(b.percent / 10, 0, 10));
+    switch (b.status) {
+    case BatteryStatus::Discharging: return level;
+    case BatteryStatus::Charging:    return kCable | level;
+    case BatteryStatus::Full:        return kCable | 11;
+    case BatteryStatus::NotCharging: return kCable | 14;
+    case BatteryStatus::Unknown:     break;
+    }
+    return kCable | 15;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -152,12 +179,20 @@ static std::uint16_t ds4_timestamp_now() {
 
 struct VirtualDevice::Impl {
     int fd = -1;
+    int output_event_fd = -1;       // signalled when `pending` has output
     std::uint8_t counter = 0;       // 6-bit frame counter
     std::uint8_t touch_counter = 0; // touch packet timestamp
+    std::array<std::uint8_t, 6> mac{};
 
-    // Permanent background thread variables
+    // Permanent background thread variables.  The I/O thread is the only
+    // reader of the UHID fd; it hands rumble/LED output to the main loop
+    // through `pending` + `output_event_fd`.
     std::atomic<bool> running{false};
     std::thread io_thread;
+    std::mutex pending_mutex;
+    RumbleOutput pending;
+
+    void handle_events();
 
     ~Impl() {
         if (fd >= 0) {
@@ -173,12 +208,21 @@ struct VirtualDevice::Impl {
             [[maybe_unused]] auto _ = ::write(fd, &ev, sizeof(ev));
             ::close(fd);
         }
+        if (output_event_fd >= 0) ::close(output_event_fd);
     }
 };
 
-VirtualDevice::VirtualDevice()
+VirtualDevice::VirtualDevice(const std::array<std::uint8_t, 6>& mac)
     : impl_(std::make_unique<Impl>())
 {
+    impl_->mac = mac;
+
+    impl_->output_event_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (impl_->output_event_fd < 0) {
+        throw std::system_error(errno, std::system_category(),
+                                "eventfd failed");
+    }
+
     // ── Open /dev/uhid ───────────────────────────────────────────────────────
     impl_->fd = ::open("/dev/uhid", O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (impl_->fd < 0) {
@@ -197,9 +241,9 @@ VirtualDevice::VirtualDevice()
     std::strncpy(reinterpret_cast<char*>(cr.phys),
                  std::string(kVirtualDS4Phys).c_str(),
                  sizeof(cr.phys) - 1);
-    std::strncpy(reinterpret_cast<char*>(cr.uniq),
-                 "30:0e:d5:89:8c:29",
-                 sizeof(cr.uniq) - 1);
+    std::snprintf(reinterpret_cast<char*>(cr.uniq), sizeof(cr.uniq),
+                  "%02x:%02x:%02x:%02x:%02x:%02x",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     cr.bus     = BUS_USB;
     cr.vendor  = kVidSony;
@@ -216,18 +260,20 @@ VirtualDevice::VirtualDevice()
 
     // ── Permanent Background I/O Thread ──────────────────────────────────────
     // The kernel probe runs asynchronously, meaning the driver may request the
-    // MAC address (0x81) after this constructor returns. Furthermore, the main
-    // loop does not poll the UHID fd for rumble/LED output events. We must keep
-    // a thread permanently alive to answer requests and process outputs.
+    // MAC address (0x81 / 0x12) after this constructor returns, and feature
+    // requests block the requester until answered.  A dedicated thread
+    // answers them and collects rumble/LED output for the main loop.  It
+    // captures the heap-allocated Impl (not `this`) so moving the
+    // VirtualDevice cannot leave it with a dangling pointer.
     impl_->running.store(true, std::memory_order_relaxed);
-    impl_->io_thread = std::thread([this]() {
+    impl_->io_thread = std::thread([impl = impl_.get()]() {
         struct pollfd pfd{};
-        pfd.fd = impl_->fd;
+        pfd.fd = impl->fd;
         pfd.events = POLLIN;
-        while (impl_->running.load(std::memory_order_relaxed)) {
+        while (impl->running.load(std::memory_order_relaxed)) {
             // Poll with a 100ms timeout to periodically check the 'running' flag
             if (::poll(&pfd, 1, 100) > 0) {
-                this->process_output();
+                impl->handle_events();
             }
         }
     });
@@ -243,14 +289,24 @@ VirtualDevice::VirtualDevice()
     }
 
     std::cout << "[ds4linux] Virtual DS4 gamepad created via UHID "
-              << "(VID=054C PID=05C4)\n";
+              << "(VID=054C PID=05C4, MAC=" << cr.uniq << ")\n";
 }
 
 VirtualDevice::~VirtualDevice() = default;
 VirtualDevice::VirtualDevice(VirtualDevice&&) noexcept = default;
 VirtualDevice& VirtualDevice::operator=(VirtualDevice&&) noexcept = default;
 
-int VirtualDevice::fd() const noexcept { return impl_->fd; }
+int VirtualDevice::output_fd() const noexcept { return impl_->output_event_fd; }
+
+RumbleOutput VirtualDevice::take_output() {
+    std::uint64_t count = 0;
+    [[maybe_unused]] auto _ = ::read(impl_->output_event_fd, &count, sizeof(count));
+
+    std::lock_guard lock(impl_->pending_mutex);
+    RumbleOutput out = impl_->pending;
+    impl_->pending = {};
+    return out;
+}
 
 // ── send_report: pack DS4InputState → 64-byte HID report → UHID_INPUT2 ──────
 
@@ -314,7 +370,8 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     report[8] = s.l2;
     report[9] = s.r2;
 
-    put_le16(report, 10, static_cast<std::int16_t>(ds4_timestamp_now()));
+    const std::uint64_t ts_us = s.has_sensor_time ? s.sensor_time_us : steady_now_us();
+    put_le16(report, 10, static_cast<std::int16_t>(ds4_timestamp(ts_us)));
 
     // IMU
     put_le16(report, 13, s.gyro_x);
@@ -324,17 +381,8 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     put_le16(report, 21, s.accel_y);
     put_le16(report, 23, s.accel_z);
 
-    // ── Byte 30: Battery level & cable state ─────────────────────────────────
-    // Level 0–10 is 0–100% in steps of 10.  With the cable bit (0x10) set,
-    // 0–10 means charging and 11 means full.  Unknown battery → cabled + full.
-    std::uint8_t level;
-    if (s.battery_percent < 0 || (s.cable_connected && s.battery_full)) {
-        level = 11;
-    } else {
-        level = static_cast<std::uint8_t>(std::min(s.battery_percent / 10, 10));
-    }
-    bool cable = s.cable_connected || s.battery_percent < 0;
-    report[30] = (cable ? 0x10 : 0x00) | (level & 0x0F);
+    // Battery level & cable state
+    report[30] = encode_battery(s.battery);
 
     // ── Bytes 33–42: Touchpad (one packet, two touch points) ─────────────────
     report[33] = 1;
@@ -361,14 +409,15 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     [[maybe_unused]] auto rc = ::write(impl_->fd, &ev, sizeof(ev));
 }
 
-// ── process_output: handle UHID_OUTPUT (rumble/LED) and UHID_GET_REPORT ──────
+// ── handle_events: UHID_OUTPUT (rumble/LED) and feature report requests ─────
+// Runs on the I/O thread only.
 
-RumbleOutput VirtualDevice::process_output() {
+void VirtualDevice::Impl::handle_events() {
     RumbleOutput result;
 
     while (true) {
         struct uhid_event ev{};
-        auto n = ::read(impl_->fd, &ev, sizeof(ev));
+        auto n = ::read(fd, &ev, sizeof(ev));
         if (n < static_cast<ssize_t>(sizeof(ev.type))) break;
 
         switch (ev.type) {
@@ -413,6 +462,11 @@ RumbleOutput VirtualDevice::process_output() {
 
             std::uint8_t rnum = ev.u.get_report.rnum;
 
+            // MAC octets in report order (little-endian: last octet first)
+            auto put_mac_le = [&](std::uint8_t* dst) {
+                for (std::size_t k = 0; k < 6; ++k) dst[k] = mac[5 - k];
+            };
+
             // Provide meaningful data for critical reports; zero-fill others.
             switch (rnum) {
             case 0x02: {
@@ -424,15 +478,12 @@ RumbleOutput VirtualDevice::process_output() {
                 break;
             }
             case 0x81: {
-                // MAC address (7 bytes: ID + 6 MAC octets)
-                // Authentic DS4 v1 OUI/MAC: 30:0E:D5:89:8C:29
-                std::uint8_t mac[7]{};
-                mac[0] = 0x81;
-                // Reversed for Little-Endian parsing -> 30:0E:D5:89:8C:29
-                mac[1] = 0x29; mac[2] = 0x8C; mac[3] = 0x89;
-                mac[4] = 0xD5; mac[5] = 0x0E; mac[6] = 0x30;
-                reply.u.get_report_reply.size = sizeof(mac);
-                std::memcpy(reply.u.get_report_reply.data, mac, sizeof(mac));
+                // MAC address (7 bytes: ID + 6 MAC octets, little-endian)
+                std::uint8_t addr[7]{};
+                addr[0] = 0x81;
+                put_mac_le(addr + 1);
+                reply.u.get_report_reply.size = sizeof(addr);
+                std::memcpy(reply.u.get_report_reply.data, addr, sizeof(addr));
                 break;
             }
             case 0xA3: {
@@ -452,11 +503,8 @@ RumbleOutput VirtualDevice::process_output() {
                 // Paired device / link key / MAC (16 bytes)
                 std::uint8_t lk[16]{};
                 lk[0] = 0x12;
-                
-                // Reversed for Little-Endian parsing -> 30:0E:D5:89:8C:29
-                lk[1] = 0x29; lk[2] = 0x8C; lk[3] = 0x89;
-                lk[4] = 0xD5; lk[5] = 0x0E; lk[6] = 0x30;
-                
+                put_mac_le(lk + 1);
+
                 reply.u.get_report_reply.size = sizeof(lk);
                 std::memcpy(reply.u.get_report_reply.data, lk, sizeof(lk));
                 break;
@@ -476,7 +524,7 @@ RumbleOutput VirtualDevice::process_output() {
             ssize_t rc;
             int retries = 0;
             do {
-                rc = ::write(impl_->fd, &reply, sizeof(reply));
+                rc = ::write(fd, &reply, sizeof(reply));
                 if (rc < 0 && errno == EAGAIN) {
                     retries++;
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -499,7 +547,7 @@ RumbleOutput VirtualDevice::process_output() {
             ssize_t rc;
             int retries = 0;
             do {
-                rc = ::write(impl_->fd, &reply, sizeof(reply));
+                rc = ::write(fd, &reply, sizeof(reply));
                 if (rc < 0 && errno == EAGAIN) {
                     retries++;
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -507,7 +555,7 @@ RumbleOutput VirtualDevice::process_output() {
             } while (rc < 0 && errno == EAGAIN && retries < 50);
             
             if (rc < 0) {
-                std::cerr << "[ds4linux] CRITICAL: Failed to send MAC address to kernel. Errno: " << errno << "\n";
+                std::cerr << "[ds4linux] Failed to write UHID_SET_REPORT_REPLY. Errno: " << errno << "\n";
             }
             break;
         }
@@ -523,7 +571,24 @@ RumbleOutput VirtualDevice::process_output() {
             break;
         } // switch ev.type
     }
-    return result;
+
+    if (result.heavy >= 0 || result.led_changed) {
+        {
+            std::lock_guard lock(pending_mutex);
+            if (result.heavy >= 0) {
+                pending.heavy = result.heavy;
+                pending.light = result.light;
+            }
+            if (result.led_changed) {
+                pending.led_r = result.led_r;
+                pending.led_g = result.led_g;
+                pending.led_b = result.led_b;
+                pending.led_changed = true;
+            }
+        }
+        std::uint64_t one = 1;
+        [[maybe_unused]] auto _ = ::write(output_event_fd, &one, sizeof(one));
+    }
 }
 
 } // namespace ds4linux::daemon

@@ -5,9 +5,11 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <set>
 
 #include <libevdev/libevdev.h>
 #include <fcntl.h>
@@ -19,7 +21,8 @@ namespace fs = std::filesystem;
 
 namespace ds4linux::daemon {
 
-DeviceManager::DeviceManager()  = default;
+DeviceManager::DeviceManager(DeviceManagerOptions options)
+    : options_(std::move(options)) {}
 DeviceManager::~DeviceManager() = default;
 
 // ── Capability helpers ───────────────────────────────────────────────────────
@@ -107,6 +110,7 @@ static bool is_motion_node(int fd) {
 /// Get the physical device path from sysfs for an event node.
 /// e.g. /dev/input/event19 → /sys/class/input/event19/device/device
 /// Returns the realpath of the parent "device" symlink so we can find siblings.
+/// Empty for devices without a parent (uinput-created virtual devices).
 static std::string get_physical_id(const std::string& evdev_path) {
     // Extract eventN from path
     auto fname = fs::path(evdev_path).filename().string();
@@ -134,12 +138,62 @@ static bool is_own_virtual_node(int fd, const struct input_id& id,
            physical_id.starts_with("/sys/devices/virtual/misc/uhid/");
 }
 
+static bool is_supported_sony(const struct input_id& id) {
+    return id.vendor == kVidSony &&
+           (id.product == kPidDS4v1 || id.product == kPidDS4v2 ||
+            id.product == kPidDualSense || id.product == kPidDualSenseEdge);
+}
+
+bool DeviceManager::generic_allowed(std::uint16_t vid, std::uint16_t pid) const {
+    if (!options_.generic_enabled) return false;
+    if (options_.generic_ids.empty()) return true;
+    return std::any_of(options_.generic_ids.begin(), options_.generic_ids.end(),
+                       [&](const auto& p) { return p.first == vid && p.second == pid; });
+}
+
+// ── Virtual MAC allocation ───────────────────────────────────────────────────
+// hid-playstation rejects a device whose MAC is already registered (including
+// the physical controller's own), so each virtual DS4 needs its own address.
+// It is derived from a stable seed (the physical MAC / sysfs path) so games
+// and Steam see the same virtual controller across reconnects.
+
+static std::array<std::uint8_t, 6> parse_mac(const std::string& s) {
+    std::array<std::uint8_t, 6> m{};
+    unsigned v[6];
+    if (std::sscanf(s.c_str(), "%x:%x:%x:%x:%x:%x",
+                    &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6) {
+        for (int i = 0; i < 6; ++i) m[i] = static_cast<std::uint8_t>(v[i]);
+    }
+    return m;
+}
+
+std::array<std::uint8_t, 6>
+DeviceManager::allocate_virtual_mac(const std::string& seed,
+                                    const std::string& physical_uniq) const {
+    std::uint64_t h = 1469598103934665603ull;  // FNV-1a
+    for (unsigned char c : seed) { h ^= c; h *= 1099511628211ull; }
+
+    std::array<std::uint8_t, 6> mac{0x30, 0x0E, 0xD5,  // Sony OUI (real DS4s)
+                                    static_cast<std::uint8_t>(h >> 16),
+                                    static_cast<std::uint8_t>(h >> 8),
+                                    static_cast<std::uint8_t>(h)};
+
+    std::set<std::array<std::uint8_t, 6>> taken;
+    for (const auto& [path, slot] : slots_) taken.insert(slot.virtual_mac);
+    taken.insert(parse_mac(physical_uniq));
+
+    while (taken.count(mac)) {
+        if (++mac[5] == 0) ++mac[4];
+    }
+    return mac;
+}
+
 // ── Scanning ─────────────────────────────────────────────────────────────────
 
 void DeviceManager::scan() {
-    std::cout << "[ds4linux] Scanning /dev/input/ for Sony controllers...\n";
+    std::cout << "[ds4linux] Scanning /dev/input/ for controllers...\n";
 
-    // First pass: find all Sony event nodes and classify them
+    // First pass: find all supported event nodes and classify them
     struct NodeInfo {
         std::string path;
         std::string physical_id;
@@ -147,7 +201,8 @@ void DeviceManager::scan() {
     };
     std::vector<NodeInfo> nodes;
 
-    for (const auto& entry : fs::directory_iterator("/dev/input")) {
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator("/dev/input", ec)) {
         auto fname = entry.path().filename().string();
         if (fname.rfind("event", 0) != 0) continue;
 
@@ -171,35 +226,39 @@ void DeviceManager::scan() {
             continue;
         }
 
-        bool vid_match = (id.vendor == kVidSony);
-        bool pid_match = (id.product == kPidDS4v1 || id.product == kPidDS4v2 ||
-                          id.product == kPidDualSense || id.product == kPidDualSenseEdge);
+        const bool sony    = is_supported_sony(id);
+        const bool generic = !sony && generic_allowed(id.vendor, id.product);
+        if (!sony && !generic) {
+            ::close(fd);
+            continue;
+        }
 
-        if (vid_match && pid_match) {
+        auto phys_id = get_physical_id(entry.path().string());
+
+        // Skip our own virtual devices (gamepad, touchpad and motion nodes
+        // the kernel DS4 driver creates for the UHID device), and for generic
+        // pads anything without a parent device — uinput gamepads created by
+        // Steam Input or other remappers, which would otherwise feed back.
+        if (is_own_virtual_node(fd, id, phys_id) || (generic && phys_id.empty())) {
+            ::close(fd);
+            continue;
+        }
+
+        NodeInfo::Type type = NodeInfo::Other;
+        if (is_gamepad_node(fd))       type = NodeInfo::Gamepad;
+        else if (is_touchpad_node(fd)) type = NodeInfo::Touchpad;
+        else if (is_motion_node(fd))   type = NodeInfo::Motion;
+
+        if (type != NodeInfo::Other) {
             char name_buf[256] = {};
             ::ioctl(fd, EVIOCGNAME(sizeof(name_buf)), name_buf);
 
-            auto phys_id = get_physical_id(entry.path().string());
-
-            // Skip our own virtual devices (gamepad, touchpad and motion nodes
-            // the kernel DS4 driver creates for the UHID device)
-            if (is_own_virtual_node(fd, id, phys_id)) {
-                ::close(fd);
-                continue;
-            }
-
-            NodeInfo::Type type = NodeInfo::Other;
-            if (is_gamepad_node(fd))       type = NodeInfo::Gamepad;
-            else if (is_touchpad_node(fd)) type = NodeInfo::Touchpad;
-            else if (is_motion_node(fd))   type = NodeInfo::Motion;
-
-            const char* type_str = "other";
-            if (type == NodeInfo::Gamepad)  type_str = "gamepad";
+            const char* type_str = "gamepad";
             if (type == NodeInfo::Touchpad) type_str = "touchpad";
             if (type == NodeInfo::Motion)   type_str = "motion";
 
-            std::cout << "[ds4linux] Found " << type_str << ": "
-                      << entry.path() << " (" << name_buf << ")"
+            std::cout << "[ds4linux] Found " << (generic ? "generic " : "")
+                      << type_str << ": " << entry.path() << " (" << name_buf << ")"
                       << " phys=" << phys_id << "\n";
 
             nodes.push_back({entry.path().string(), phys_id, type});
@@ -212,106 +271,270 @@ void DeviceManager::scan() {
     int opened = 0;
     for (const auto& gp : nodes) {
         if (gp.type != NodeInfo::Gamepad) continue;
-        if (slots_.count(gp.path)) continue; // already open
 
         std::string tp_path, mo_path;
         for (const auto& n : nodes) {
-            if (n.physical_id == gp.physical_id && n.path != gp.path) {
+            if (!gp.physical_id.empty() && n.physical_id == gp.physical_id &&
+                n.path != gp.path) {
                 if (n.type == NodeInfo::Touchpad && tp_path.empty()) tp_path = n.path;
                 if (n.type == NodeInfo::Motion   && mo_path.empty()) mo_path = n.path;
             }
         }
 
-        std::cout << "[ds4linux] Opening controller group:\n"
-                  << "  gamepad:  " << gp.path << "\n"
-                  << "  touchpad: " << (tp_path.empty() ? "(not found)" : tp_path) << "\n"
-                  << "  motion:   " << (mo_path.empty() ? "(not found)" : mo_path) << "\n";
-
-        open_slot(gp.path);
-
-        // Attach touchpad & motion to the slot
         auto it = slots_.find(gp.path);
-        if (it != slots_.end()) {
-            it->second.touchpad_path = tp_path;
-            it->second.motion_path   = mo_path;
+        if (it == slots_.end()) {
+            std::cout << "[ds4linux] Opening controller group:\n"
+                      << "  gamepad:  " << gp.path << "\n"
+                      << "  touchpad: " << (tp_path.empty() ? "(not found)" : tp_path) << "\n"
+                      << "  motion:   " << (mo_path.empty() ? "(not found)" : mo_path) << "\n";
 
-            if (!tp_path.empty()) {
-                try {
-                    it->second.physical_touchpad =
-                        std::make_unique<InputDevice>(tp_path, /*grab=*/true);
-                    std::cout << "[ds4linux] Touchpad active: " << tp_path << "\n";
-                } catch (const std::exception& ex) {
-                    std::cerr << "[ds4linux] Could not open touchpad "
-                              << tp_path << ": " << ex.what() << "\n";
-                }
-            }
-
-            if (!mo_path.empty()) {
-                try {
-                    it->second.physical_motion =
-                        std::make_unique<InputDevice>(mo_path, /*grab=*/true);
-                    std::cout << "[ds4linux] Motion sensors active: " << mo_path << "\n";
-                } catch (const std::exception& ex) {
-                    std::cerr << "[ds4linux] Could not open motion "
-                              << mo_path << ": " << ex.what() << "\n";
-                }
-            }
-
+            if (!open_slot(gp.path, gp.physical_id)) continue;
+            it = slots_.find(gp.path);
             ++opened;
+        }
+        auto& slot = it->second;
+
+        // Attach touchpad & motion — also for already-open slots, whose
+        // sibling nodes may have appeared after the gamepad node
+        if (!tp_path.empty() && !slot.physical_touchpad) {
+            try {
+                slot.physical_touchpad =
+                    std::make_unique<InputDevice>(tp_path, /*grab=*/true);
+                slot.touchpad_path = tp_path;
+                slot.touch_x = slot.physical_touchpad->abs_range(ABS_MT_POSITION_X);
+                slot.touch_y = slot.physical_touchpad->abs_range(ABS_MT_POSITION_Y);
+                std::cout << "[ds4linux] Touchpad active: " << tp_path << "\n";
+            } catch (const std::exception& ex) {
+                std::cerr << "[ds4linux] Could not open touchpad "
+                          << tp_path << ": " << ex.what() << "\n";
+            }
+        }
+
+        if (!mo_path.empty() && !slot.physical_motion) {
+            try {
+                slot.physical_motion =
+                    std::make_unique<InputDevice>(mo_path, /*grab=*/true);
+                slot.motion_path = mo_path;
+                slot.gyro_res  = slot.physical_motion->abs_range(ABS_RX).resolution;
+                slot.accel_res = slot.physical_motion->abs_range(ABS_X).resolution;
+                std::cout << "[ds4linux] Motion sensors active: " << mo_path << "\n";
+            } catch (const std::exception& ex) {
+                std::cerr << "[ds4linux] Could not open motion "
+                          << mo_path << ": " << ex.what() << "\n";
+            }
         }
     }
 
     std::cout << "[ds4linux] Scan complete — " << opened
-              << " controller(s) found, " << slots_.size()
-              << " slot(s) opened.\n";
+              << " new controller(s), " << slots_.size()
+              << " slot(s) open.\n";
 }
 
 // ── Hotplug ──────────────────────────────────────────────────────────────────
 
 void DeviceManager::on_device_added(const std::string& evdev_path) {
     if (slots_.count(evdev_path)) return;
-
-    int fd = ::open(evdev_path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0) return;
-    struct input_id id{};
-    bool own = ::ioctl(fd, EVIOCGID, &id) >= 0 &&
-               is_own_virtual_node(fd, id, get_physical_id(evdev_path));
-    ::close(fd);
-    if (own) return;
-
-    open_slot(evdev_path);
+    // A full scan applies the same filtering and pairs sibling nodes
+    scan();
 }
 
 void DeviceManager::on_device_removed(const std::string& evdev_path) {
     close_slot(evdev_path);
 }
 
-// ── Translate loop ───────────────────────────────────────────────────────────
+// ── Normalisation helpers ────────────────────────────────────────────────────
 
-static std::int16_t clamp_i16(std::int32_t v) {
-    return static_cast<std::int16_t>(std::clamp<std::int32_t>(v, -32768, 32767));
+static std::int16_t clamp_i16(std::int64_t v) {
+    return static_cast<std::int16_t>(std::clamp<std::int64_t>(v, -32768, 32767));
+}
+
+/// Integer division rounding to nearest (half away from zero).
+static std::int64_t round_div(std::int64_t num, std::int64_t den) {
+    return (num >= 0 ? num + den / 2 : num - den / 2) / den;
+}
+
+/// Map a value from an axis range onto 0..255 (DS4 stick / trigger range).
+static std::uint8_t to_u8(std::int32_t v, const AbsRange& r) {
+    if (!r.present || r.maximum <= r.minimum) {
+        return static_cast<std::uint8_t>(std::clamp(v, 0, 255));
+    }
+    const std::int64_t span = static_cast<std::int64_t>(r.maximum) - r.minimum;
+    const std::int64_t n = (static_cast<std::int64_t>(v) - r.minimum) * 255 + span / 2;
+    return static_cast<std::uint8_t>(std::clamp<std::int64_t>(n / span, 0, 255));
 }
 
 /// Rescale a touch coordinate from the physical pad's range to the DS4 pad's.
-static std::uint16_t scale_touch(std::int32_t v, int src_max, int dst_max) {
-    if (src_max <= 0) src_max = dst_max;
-    std::int64_t scaled = static_cast<std::int64_t>(v) * dst_max / src_max;
+static std::uint16_t scale_touch(std::int32_t v, const AbsRange& r, int dst_max) {
+    std::int64_t scaled = v;
+    if (r.present && r.maximum > r.minimum) {
+        scaled = (static_cast<std::int64_t>(v) - r.minimum) * dst_max /
+                 (static_cast<std::int64_t>(r.maximum) - r.minimum);
+    }
     return static_cast<std::uint16_t>(std::clamp<std::int64_t>(scaled, 0, dst_max));
+}
+
+/// Work out how this gamepad's axes map onto the DS4 report.
+static GamepadMap build_gamepad_map(const InputDevice& dev) {
+    GamepadMap m;
+    m.lx = dev.abs_range(ABS_X);
+    m.ly = dev.abs_range(ABS_Y);
+
+    // Right stick is normally RX/RY.  Many HID gamepads (DirectInput mode)
+    // report it on Z/RZ instead and have digital-only triggers.
+    const bool rxry = dev.has_event_code(EV_ABS, ABS_RX) && dev.has_event_code(EV_ABS, ABS_RY);
+    const bool zrz  = dev.has_event_code(EV_ABS, ABS_Z)  && dev.has_event_code(EV_ABS, ABS_RZ);
+    const bool z_is_stick = !rxry && zrz;
+    m.rx_code = z_is_stick ? ABS_Z  : ABS_RX;
+    m.ry_code = z_is_stick ? ABS_RZ : ABS_RY;
+    m.rx = dev.abs_range(m.rx_code);
+    m.ry = dev.abs_range(m.ry_code);
+
+    auto pick_trigger = [&](std::uint16_t primary, std::uint16_t fallback) {
+        if (!z_is_stick && dev.has_event_code(EV_ABS, primary)) return int{primary};
+        if (dev.has_event_code(EV_ABS, fallback)) return int{fallback};
+        return -1;
+    };
+    m.l2_code = pick_trigger(ABS_Z,  ABS_BRAKE);
+    m.r2_code = pick_trigger(ABS_RZ, ABS_GAS);
+    if (m.l2_code >= 0) m.l2 = dev.abs_range(static_cast<std::uint16_t>(m.l2_code));
+    if (m.r2_code >= 0) m.r2 = dev.abs_range(static_cast<std::uint16_t>(m.r2_code));
+
+    const bool btn_tl2 = dev.has_event_code(EV_KEY, BTN_TL2);
+    const bool btn_tr2 = dev.has_event_code(EV_KEY, BTN_TR2);
+    m.synth_l2_btn  = m.l2_code >= 0 && !btn_tl2;
+    m.synth_r2_btn  = m.r2_code >= 0 && !btn_tr2;
+    m.synth_l2_axis = m.l2_code < 0 && btn_tl2;
+    m.synth_r2_axis = m.r2_code < 0 && btn_tr2;
+    return m;
+}
+
+// Analog trigger level at which a synthesised L2/R2 button counts as pressed.
+static constexpr std::uint8_t kTriggerButtonThreshold = 30;
+
+static void apply_gamepad_event(ControllerSlot& slot, std::uint16_t type,
+                                std::uint16_t code, std::int32_t value) {
+    auto& s = slot.ds4_state;
+    const auto& m = slot.gamepad_map;
+
+    if (type == EV_ABS) {
+        if (code == ABS_X)          { s.lx = to_u8(value, m.lx); return; }
+        if (code == ABS_Y)          { s.ly = to_u8(value, m.ly); return; }
+        if (code == m.rx_code)      { s.rx = to_u8(value, m.rx); return; }
+        if (code == m.ry_code)      { s.ry = to_u8(value, m.ry); return; }
+        if (code == m.l2_code) {
+            s.l2 = to_u8(value, m.l2);
+            if (m.synth_l2_btn) s.l2_btn = s.l2 >= kTriggerButtonThreshold;
+            return;
+        }
+        if (code == m.r2_code) {
+            s.r2 = to_u8(value, m.r2);
+            if (m.synth_r2_btn) s.r2_btn = s.r2 >= kTriggerButtonThreshold;
+            return;
+        }
+        if (code == ABS_HAT0X) { s.hat_x = std::clamp(value, -1, 1); return; }
+        if (code == ABS_HAT0Y) { s.hat_y = std::clamp(value, -1, 1); return; }
+        return;
+    }
+
+    if (type != EV_KEY) return;
+    const bool pressed = (value != 0);
+    auto& d = slot.dpad_btn;
+    switch (code) {
+    case BTN_WEST:   s.square   = pressed; break; // Square
+    case BTN_SOUTH:  s.cross    = pressed; break; // Cross
+    case BTN_EAST:   s.circle   = pressed; break; // Circle
+    case BTN_NORTH:  s.triangle = pressed; break; // Triangle
+    case BTN_TL:     s.l1       = pressed; break; // L1
+    case BTN_TR:     s.r1       = pressed; break; // R1
+    case BTN_TL2:
+        s.l2_btn = pressed;                       // L2 digital
+        if (m.synth_l2_axis) s.l2 = pressed ? 255 : 0;
+        break;
+    case BTN_TR2:
+        s.r2_btn = pressed;                       // R2 digital
+        if (m.synth_r2_axis) s.r2 = pressed ? 255 : 0;
+        break;
+    case BTN_SELECT: s.share    = pressed; break; // Share/Create
+    case BTN_START:  s.options  = pressed; break; // Options
+    case BTN_THUMBL: s.l3       = pressed; break; // L3
+    case BTN_THUMBR: s.r3       = pressed; break; // R3
+    case BTN_MODE:   s.ps       = pressed; break; // PS
+    // D-pad reported as buttons (some generic pads) instead of a hat
+    case BTN_DPAD_UP:    d.up    = pressed; s.hat_y = d.down  - d.up;   break;
+    case BTN_DPAD_DOWN:  d.down  = pressed; s.hat_y = d.down  - d.up;   break;
+    case BTN_DPAD_LEFT:  d.left  = pressed; s.hat_x = d.right - d.left; break;
+    case BTN_DPAD_RIGHT: d.right = pressed; s.hat_x = d.right - d.left; break;
+    default: break;
+    }
+}
+
+static void apply_motion_event(ControllerSlot& slot, std::uint16_t type,
+                               std::uint16_t code, std::int32_t value) {
+    auto& s = slot.ds4_state;
+    if (type == EV_MSC && code == MSC_TIMESTAMP) {
+        s.sensor_time_us  = static_cast<std::uint32_t>(value);
+        s.has_sensor_time = true;
+        return;
+    }
+    if (type != EV_ABS) return;
+
+    // Convert the driver's normalised units (axis resolution = units per
+    // deg/s or per g) back to raw DS4 units (see constants.h)
+    const int gyro_res  = slot.gyro_res  > 0 ? slot.gyro_res  : kEvdevGyroPerDegS;
+    const int accel_res = slot.accel_res > 0 ? slot.accel_res : kDS4AccelPerG;
+    auto gyro  = [&](std::int32_t v) {
+        return clamp_i16(round_div(std::int64_t{v} * kDS4GyroPerDegS, gyro_res));
+    };
+    auto accel = [&](std::int32_t v) {
+        return clamp_i16(round_div(std::int64_t{v} * kDS4AccelPerG, accel_res));
+    };
+    switch (code) {
+    case ABS_X:  s.accel_x = accel(value); break;
+    case ABS_Y:  s.accel_y = accel(value); break;
+    case ABS_Z:  s.accel_z = accel(value); break;
+    case ABS_RX: s.gyro_x  = gyro(value);  break;
+    case ABS_RY: s.gyro_y  = gyro(value);  break;
+    case ABS_RZ: s.gyro_z  = gyro(value);  break;
+    default: break;
+    }
+}
+
+/// Refresh both DS4 touch points from libevdev's multitouch slot state.
+/// Returns true if a finger was put down or lifted.
+static bool refresh_touches(ControllerSlot& slot) {
+    bool transition = false;
+    for (int i = 0; i < 2; ++i) {
+        auto& t = slot.ds4_state.touches[i];
+        const MtContact c = slot.physical_touchpad->mt_contact(i);
+        const bool active = c.tracking_id >= 0;
+        if (active != t.active) transition = true;
+        t.active = active;
+        if (active) {
+            t.id = static_cast<std::uint8_t>(c.tracking_id & 0x7F);
+            t.x  = scale_touch(c.x, slot.touch_x, kDS4TouchpadMaxX);
+            t.y  = scale_touch(c.y, slot.touch_y, kDS4TouchpadMaxY);
+        }
+    }
+    return transition;
 }
 
 static constexpr auto kBatteryPollInterval = std::chrono::seconds(5);
 
+// ── Translate loop ───────────────────────────────────────────────────────────
+
 void DeviceManager::translate_events() {
     // The translation strategy for the UHID path:
-    //   1. Read evdev events from the physical DualSense (hid-playstation driver).
-    //   2. Accumulate gamepad, touchpad and motion events into the per-slot
-    //      DS4InputState.
-    //   3. If any of those nodes delivered a SYN_REPORT, pack the state into
-    //      one DS4 HID input report and dispatch it via UHID_INPUT2.  The
-    //      motion node syncs on every controller report, so the virtual DS4
-    //      runs at the physical controller's report rate.
+    //   1. Read evdev events from the physical controller's gamepad, motion
+    //      and touchpad nodes (in the order hid-playstation emits them).
+    //   2. Accumulate them into the per-slot DS4InputState.
+    //   3. Send one DS4 HID report per physical frame.  The motion node
+    //      syncs on every controller report (its timestamp always changes),
+    //      so when present it is the frame clock; otherwise any node's
+    //      SYN_REPORT ends a frame.  A finger going down or up is flushed
+    //      immediately so quick taps are never merged away.
     //
-    // Physical DualSense evdev codes (hid-playstation):
+    // Physical evdev codes (hid-playstation; generic pads follow the same
+    // evdev gamepad conventions, with axes normalised by their ranges):
     //   BTN_SOUTH=Cross, BTN_EAST=Circle, BTN_NORTH=Triangle, BTN_WEST=Square
     //   BTN_TL=L1, BTN_TR=R1, BTN_TL2=L2btn, BTN_TR2=R2btn
     //   BTN_SELECT=Share/Create, BTN_START=Options
@@ -321,126 +544,63 @@ void DeviceManager::translate_events() {
     //   ABS_HAT0X=D-pad X, ABS_HAT0Y=D-pad Y
 
     for (auto& [path, slot] : slots_) {
-        bool dirty = false;
+        if (!slot.physical || !slot.virtual_dev) continue;
+
+        const bool motion_clock = static_cast<bool>(slot.physical_motion);
+        bool frame_end = false;
 
         // ── Gamepad events (physical → DS4 HID report) ──────────────────
-        if (slot.physical && slot.virtual_dev) {
-            bool ok = slot.physical->read_events(
-                [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
-                    auto& s = slot.ds4_state;
-
-                    if (type == EV_ABS) {
-                        switch (code) {
-                        case ABS_X:     s.lx = static_cast<std::uint8_t>(value); break;
-                        case ABS_Y:     s.ly = static_cast<std::uint8_t>(value); break;
-                        case ABS_RX:    s.rx = static_cast<std::uint8_t>(value); break;
-                        case ABS_RY:    s.ry = static_cast<std::uint8_t>(value); break;
-                        case ABS_Z:     s.l2 = static_cast<std::uint8_t>(value); break;
-                        case ABS_RZ:    s.r2 = static_cast<std::uint8_t>(value); break;
-                        case ABS_HAT0X: s.hat_x = value; break;
-                        case ABS_HAT0Y: s.hat_y = value; break;
-                        default: break;
-                        }
-                    } else if (type == EV_KEY) {
-                        bool pressed = (value != 0);
-                        switch (code) {
-                        case BTN_WEST:   s.square   = pressed; break; // Square
-                        case BTN_SOUTH:  s.cross    = pressed; break; // Cross
-                        case BTN_EAST:   s.circle   = pressed; break; // Circle
-                        case BTN_NORTH:  s.triangle = pressed; break; // Triangle
-                        case BTN_TL:     s.l1       = pressed; break; // L1
-                        case BTN_TR:     s.r1       = pressed; break; // R1
-                        case BTN_TL2:    s.l2_btn   = pressed; break; // L2 digital
-                        case BTN_TR2:    s.r2_btn   = pressed; break; // R2 digital
-                        case BTN_SELECT: s.share    = pressed; break; // Share/Create
-                        case BTN_START:  s.options  = pressed; break; // Options
-                        case BTN_THUMBL: s.l3       = pressed; break; // L3
-                        case BTN_THUMBR: s.r3       = pressed; break; // R3
-                        case BTN_MODE:   s.ps       = pressed; break; // PS
-                        default: break;
-                        }
-                    } else if (type == EV_SYN && code == SYN_REPORT) {
-                        dirty = true;
-                    }
+        bool ok = slot.physical->read_events(
+            [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
+                if (type == EV_SYN) {
+                    if (code == SYN_REPORT && !motion_clock) frame_end = true;
+                    return;
                 }
-            );
-            if (!ok) {
-                std::cerr << "[ds4linux] Device disconnected: " << path << "\n";
+                apply_gamepad_event(slot, type, code, value);
             }
+        );
+        if (!ok) {
+            std::cerr << "[ds4linux] Device disconnected: " << path << "\n";
         }
 
-        // ── UHID output events (rumble/LED from applications → physical) ─
-        if (slot.virtual_dev && slot.physical) {
-            auto out = slot.virtual_dev->process_output();
-            if (out.heavy >= 0) {
-                slot.physical->set_rumble(
-                    static_cast<std::uint8_t>(out.heavy),
-                    static_cast<std::uint8_t>(out.light));
-            }
-            if (out.led_changed) {
-                slot.physical->set_lightbar(out.led_r, out.led_g, out.led_b);
-            }
+        // ── UHID output (rumble/LED from applications → physical) ───────
+        auto out = slot.virtual_dev->take_output();
+        if (out.heavy >= 0) {
+            slot.physical->set_rumble(
+                static_cast<std::uint8_t>(out.heavy),
+                static_cast<std::uint8_t>(out.light));
         }
-
-        // ── Touchpad events (physical → DS4 report touch points) ────────
-        if (slot.physical_touchpad) {
-            const int src_max_x = slot.physical_touchpad->abs_maximum(ABS_MT_POSITION_X);
-            const int src_max_y = slot.physical_touchpad->abs_maximum(ABS_MT_POSITION_Y);
-            slot.physical_touchpad->read_events(
-                [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
-                    auto& s = slot.ds4_state;
-
-                    if (type == EV_ABS) {
-                        if (code == ABS_MT_SLOT) {
-                            // The DS4 report only has two touch points
-                            s.current_touch_slot = (value >= 0 && value < 2) ? value : -1;
-                            return;
-                        }
-                        if (s.current_touch_slot < 0) return;
-                        auto& t = s.touches[s.current_touch_slot];
-                        switch (code) {
-                        case ABS_MT_TRACKING_ID:
-                            t.active = (value != -1);
-                            if (t.active) t.id = static_cast<std::uint8_t>(value & 0x7F);
-                            break;
-                        case ABS_MT_POSITION_X:
-                            t.x = scale_touch(value, src_max_x, kDS4TouchpadMaxX);
-                            break;
-                        case ABS_MT_POSITION_Y:
-                            t.y = scale_touch(value, src_max_y, kDS4TouchpadMaxY);
-                            break;
-                        default: break;
-                        }
-                    } else if (type == EV_KEY && code == BTN_LEFT) {
-                        // BTN_LEFT on the touchpad node is the touchpad click
-                        s.touchpad = (value != 0);
-                    } else if (type == EV_SYN && code == SYN_REPORT) {
-                        dirty = true;
-                    }
-                }
-            );
+        if (out.led_changed) {
+            slot.physical->set_lightbar(out.led_r, out.led_g, out.led_b);
         }
 
         // ── Motion events (physical → DS4 report IMU fields) ────────────
         if (slot.physical_motion) {
             slot.physical_motion->read_events(
                 [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
-                    auto& s = slot.ds4_state;
-                    if (type == EV_ABS) {
-                        // hid-playstation values are normalised; convert back
-                        // to raw DS4 units (see constants.h)
-                        constexpr int gyro_div = kEvdevGyroPerDegS / kDS4GyroPerDegS;
-                        switch (code) {
-                        case ABS_X:  s.accel_x = clamp_i16(value); break;
-                        case ABS_Y:  s.accel_y = clamp_i16(value); break;
-                        case ABS_Z:  s.accel_z = clamp_i16(value); break;
-                        case ABS_RX: s.gyro_x  = clamp_i16(value / gyro_div); break;
-                        case ABS_RY: s.gyro_y  = clamp_i16(value / gyro_div); break;
-                        case ABS_RZ: s.gyro_z  = clamp_i16(value / gyro_div); break;
-                        default: break;
-                        }
+                    if (type == EV_SYN) {
+                        if (code == SYN_REPORT) frame_end = true;
+                        return;
+                    }
+                    apply_motion_event(slot, type, code, value);
+                }
+            );
+        }
+
+        // ── Touchpad events (physical → DS4 report touch points) ────────
+        if (slot.physical_touchpad) {
+            slot.physical_touchpad->read_events(
+                [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
+                    if (type == EV_KEY && code == BTN_LEFT) {
+                        // BTN_LEFT on the touchpad node is the touchpad click
+                        slot.ds4_state.touchpad = (value != 0);
                     } else if (type == EV_SYN && code == SYN_REPORT) {
-                        dirty = true;
+                        if (refresh_touches(slot)) {
+                            slot.virtual_dev->send_report(slot.ds4_state);
+                            frame_end = false;
+                        } else if (!motion_clock) {
+                            frame_end = true;
+                        }
                     }
                 }
             );
@@ -448,16 +608,12 @@ void DeviceManager::translate_events() {
 
         // ── Battery (polled from sysfs) ─────────────────────────────────
         auto now = std::chrono::steady_clock::now();
-        if (slot.physical && now >= slot.next_battery_poll) {
+        if (now >= slot.next_battery_poll) {
             slot.next_battery_poll = now + kBatteryPollInterval;
-            auto bat = slot.physical->battery();
-            auto& s = slot.ds4_state;
-            s.battery_percent = bat.percent;
-            s.cable_connected = bat.cable_connected;
-            s.battery_full    = bat.full;
+            slot.ds4_state.battery = slot.physical->battery();
         }
 
-        if (dirty && slot.virtual_dev) {
+        if (frame_end) {
             slot.virtual_dev->send_report(slot.ds4_state);
         }
     }
@@ -478,12 +634,21 @@ void DeviceManager::set_profile(const std::string& evdev_path, const Profile& p)
 
 // ── Internal ─────────────────────────────────────────────────────────────────
 
-void DeviceManager::open_slot(const std::string& evdev_path) {
+bool DeviceManager::open_slot(const std::string& evdev_path,
+                              const std::string& physical_id) {
     try {
         ControllerSlot slot;
-        slot.evdev_path = evdev_path;
-        slot.physical   = std::make_unique<InputDevice>(evdev_path, /*grab=*/true);
-        slot.virtual_dev = std::make_unique<VirtualDevice>();
+        slot.evdev_path  = evdev_path;
+        slot.physical_id = physical_id;
+        slot.physical    = std::make_unique<InputDevice>(evdev_path, /*grab=*/true);
+        slot.gamepad_map = build_gamepad_map(*slot.physical);
+
+        const std::string uniq = slot.physical->uniq();
+        const std::string seed = !uniq.empty()        ? uniq
+                               : !physical_id.empty() ? physical_id
+                                                      : evdev_path;
+        slot.virtual_mac = allocate_virtual_mac(seed, uniq);
+        slot.virtual_dev = std::make_unique<VirtualDevice>(slot.virtual_mac);
 
         std::cout << "[ds4linux] Opened controller: "
                   << slot.physical->name()
@@ -495,9 +660,11 @@ void DeviceManager::open_slot(const std::string& evdev_path) {
                                     slot.profile.lightbar_color.b);
 
         slots_.emplace(evdev_path, std::move(slot));
+        return true;
     } catch (const std::exception& ex) {
         std::cerr << "[ds4linux] Could not open " << evdev_path << ": "
                   << ex.what() << "\n";
+        return false;
     }
 }
 

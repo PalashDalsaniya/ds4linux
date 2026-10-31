@@ -52,11 +52,13 @@ inline constexpr int kDS4TouchpadMaxX = 1919;
 inline constexpr int kDS4TouchpadMaxY = 941;
 
 // ── Virtual DS4 motion sensor scaling ────────────────────────────────────────
-// hid-playstation reports gyro normalised to 1024 units per deg/s and accel to
-// 8192 units per g.  The virtual DS4 reports raw values like real hardware:
-// gyro at 16 units per deg/s (±2048 deg/s in int16) and accel at 8192 per g.
-// The calibration feature report (0x02) encodes exactly these scales.
-inline constexpr int kEvdevGyroPerDegS = 1024;
+// Kernel drivers report motion axes normalised to their ABS resolution
+// (hid-playstation: gyro 1024 units per deg/s, accel 8192 units per g).  The
+// virtual DS4 reports raw values like real hardware: gyro at 16 units per
+// deg/s (±2048 deg/s in int16) and accel at 8192 units per g.  The
+// calibration feature report (0x02) encodes exactly these scales.
+inline constexpr int kEvdevGyroPerDegS = 1024;  // fallback if resolution unset
 inline constexpr int kDS4GyroPerDegS   = 16;
+inline constexpr int kDS4AccelPerG     = 8192;
 
 } // namespace ds4linux

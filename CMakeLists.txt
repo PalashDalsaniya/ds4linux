@@ -63,8 +63,8 @@ if(DS4LINUX_ENABLE_PACKAGING)
         DESTINATION lib/udev/rules.d
     )
     
-    # Dynamically generate and install the uinput module load file
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ds4linux.conf "uinput\n")
+    # Dynamically generate and install the uhid module load file
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ds4linux.conf "uhid\n")
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ds4linux.conf
         DESTINATION lib/modules-load.d
     )

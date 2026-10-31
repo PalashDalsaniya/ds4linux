@@ -1,15 +1,20 @@
 #!/bin/sh
-set -e
+# ds4linux post-install: apply the udev rules and load the uhid module now.
+#
+# This must never fail the package transaction.  On image-based systems
+# (rpm-ostree: Bazzite, Silverblue, ...) scriptlets run in a sandbox without
+# access to udev or kernel modules; there the rules and the modules-load.d
+# entry simply take effect on the next boot.
 
-# Reload udev rules so the system sees the new 99-ds4linux.rules file
-udevadm control --reload-rules
-
-# Trigger udev to apply the rules to devices that are ALREADY plugged in
-udevadm trigger
-
-# Ensure the uinput module is loaded immediately without needing a reboot
-if ! lsmod | grep -q uinput; then
-    modprobe uinput || true
+if [ -e /run/ostree-booted ]; then
+    exit 0
 fi
+
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=input --subsystem-match=hidraw >/dev/null 2>&1 || true
+fi
+
+modprobe uhid >/dev/null 2>&1 || true
 
 exit 0

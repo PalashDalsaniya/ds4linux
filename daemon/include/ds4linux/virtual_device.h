@@ -4,6 +4,9 @@
 // The kernel DS4 driver creates the touchpad and motion sensor nodes itself
 // from the touch / IMU data carried in the input report.
 
+#include "ds4linux/input_device.h"
+
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -54,11 +57,13 @@ struct DS4InputState {
     std::int16_t accel_y = 0;
     std::int16_t accel_z = 0;
 
-    int  battery_percent = -1;      // 0–100, -1 = unknown
-    bool cable_connected = true;
-    bool battery_full    = false;
+    BatteryInfo battery;
 
-    int current_touch_slot = 0;     // evdev MT slot being updated, -1 = ignored
+    // Controller sensor clock (µs, wraps at 32 bits) from the motion node's
+    // MSC_TIMESTAMP; without it the report timestamp uses the system clock.
+    bool          has_sensor_time = false;
+    std::uint32_t sensor_time_us  = 0;
+
     TouchPoint touches[2];
 };
 
@@ -75,9 +80,11 @@ struct RumbleOutput {
 /// This produces both /dev/input/eventX and /dev/hidrawX nodes.
 class VirtualDevice {
 public:
-    /// Create a virtual DS4 gamepad via UHID.
+    /// Create a virtual DS4 gamepad via UHID with the given MAC address
+    /// (display order, e.g. {0x30, 0x0E, 0xD5, ...}).  The MAC must be unique:
+    /// hid-playstation refuses to bind two devices with the same MAC.
     /// Throws std::system_error on failure.
-    VirtualDevice();
+    explicit VirtualDevice(const std::array<std::uint8_t, 6>& mac);
     ~VirtualDevice();
 
     VirtualDevice(const VirtualDevice&) = delete;
@@ -88,12 +95,12 @@ public:
     /// Pack the DS4 input state into an HID report and dispatch via UHID.
     void send_report(const DS4InputState& state);
 
-    /// Read and process pending UHID output/feature events.
-    /// Call this when the UHID fd is readable.
-    RumbleOutput process_output();
+    /// Take the rumble/LED output that applications sent since the last call
+    /// (fields are -1 / led_changed=false when nothing new arrived).
+    RumbleOutput take_output();
 
-    /// The UHID file descriptor (for epoll registration).
-    [[nodiscard]] int fd() const noexcept;
+    /// Becomes readable when output is pending (for epoll registration).
+    [[nodiscard]] int output_fd() const noexcept;
 
 private:
     struct Impl;

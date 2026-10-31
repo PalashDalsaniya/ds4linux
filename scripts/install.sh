@@ -31,11 +31,9 @@ sudo cp "$PROJECT_DIR/config/99-ds4linux.rules" /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
-# Ensure uinput module is loaded now and on boot
-if ! lsmod | grep -q uinput; then
-    sudo modprobe uinput
-fi
-echo "uinput" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
+# Ensure the uhid module is loaded now and on boot
+sudo modprobe uhid || true
+echo "uhid" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
 
 echo ""
 echo "=== Installation complete ==="

@@ -10,8 +10,12 @@
 #include "ds4linux/device_manager.h"
 
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <unordered_map>
@@ -37,10 +41,71 @@ static void epoll_add(int epfd, int fd, uint32_t events = EPOLLIN) {
     }
 }
 
+// ── Command line ─────────────────────────────────────────────────────────────
+
+static void print_usage() {
+    std::cout <<
+        "Usage: ds4linux-daemon [options]\n"
+        "\n"
+        "Options:\n"
+        "  --generic             Also emulate a DS4 for non-Sony gamepads\n"
+        "  --generic=VID:PID,..  Only for these gamepads (hex IDs, e.g. 046d:c21f)\n"
+        "  --version             Print version and exit\n"
+        "  -h, --help            Show this help\n";
+}
+
+/// Parse "046d:c21f,045e:028e" into VID:PID pairs.  Returns false on error.
+static bool parse_id_list(const std::string& list,
+                          std::vector<std::pair<std::uint16_t, std::uint16_t>>& out) {
+    std::stringstream ss(list);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        unsigned vid = 0, pid = 0;
+        char tail = 0;
+        if (std::sscanf(item.c_str(), "%x:%x%c", &vid, &pid, &tail) != 2 ||
+            vid > 0xFFFF || pid > 0xFFFF) {
+            return false;
+        }
+        out.emplace_back(static_cast<std::uint16_t>(vid), static_cast<std::uint16_t>(pid));
+    }
+    return !out.empty();
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
-int main() {
+int main(int argc, char** argv) {
+    DeviceManagerOptions options;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            print_usage();
+            return EXIT_SUCCESS;
+        } else if (arg == "--version") {
+            std::cout << "ds4linux-daemon " << kVersion << "\n";
+            return EXIT_SUCCESS;
+        } else if (arg == "--generic") {
+            options.generic_enabled = true;
+        } else if (arg.rfind("--generic=", 0) == 0) {
+            options.generic_enabled = true;
+            if (!parse_id_list(arg.substr(10), options.generic_ids)) {
+                std::cerr << "[ds4linux] Invalid --generic list: " << arg.substr(10)
+                          << " (expected VID:PID[,VID:PID...] in hex)\n";
+                return EXIT_FAILURE;
+            }
+        } else {
+            std::cerr << "[ds4linux] Unknown option: " << arg << "\n";
+            print_usage();
+            return EXIT_FAILURE;
+        }
+    }
+
     std::cout << "[ds4linux] Daemon v" << kVersion << " starting\n";
+    if (options.generic_enabled) {
+        std::cout << "[ds4linux] Generic gamepad emulation enabled ("
+                  << (options.generic_ids.empty() ? "all gamepads"
+                                                  : "selected gamepads")
+                  << ")\n";
+    }
 
     // ── Signal handling ──────────────────────────────────────────────────────
     struct sigaction sa{};
@@ -50,7 +115,7 @@ int main() {
     ::sigaction(SIGTERM, &sa, nullptr);
 
     // ── Device manager ───────────────────────────────────────────────────────
-    DeviceManager devmgr;
+    DeviceManager devmgr(options);
     devmgr.scan();
 
     // ── epoll setup ──────────────────────────────────────────────────────────
@@ -76,8 +141,8 @@ int main() {
             if (slot.physical)          reg(slot.physical->fd(),          "gamepad");
             if (slot.physical_touchpad) reg(slot.physical_touchpad->fd(), "touchpad");
             if (slot.physical_motion)   reg(slot.physical_motion->fd(),   "motion");
-            // UHID fd for output events (rumble/LED from applications)
-            if (slot.virtual_dev)       reg(slot.virtual_dev->fd(),       "uhid-gamepad");
+            // Rumble/LED output from applications (collected by the UHID thread)
+            if (slot.virtual_dev)       reg(slot.virtual_dev->output_fd(), "uhid-output");
         }
     };
 

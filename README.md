@@ -1,14 +1,14 @@
 
 # ds4linux
 
-A native Linux clone of [DS4Windows](https://ds4-windows.com/download/) - a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uinput`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 device, and forwards all input and LED control. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
+A native Linux clone of [DS4Windows](https://ds4-windows.com/download/) - a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uhid`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 device, and forwards all input and LED control. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
 
 ## How It Works
 
 The daemon:
 1. Detects connected DualShock 4 / DualSense controllers.
 2. Grabs exclusive access via `libevdev` so no other process sees the raw device.
-3. Creates a virtual DualShock 4 controller via Linux `uinput`.
+3. Creates a virtual DualShock 4 controller via Linux `uhid` (with its own hidraw node, touchpad and motion sensors).
 4. Forwards all input events.
 5. Installs udev rules to hide the physical controller and expose only the virtual one.
 
@@ -47,7 +47,7 @@ systemctl reboot
 ### Arch (Install Script)
 
 ```bash
-git clone https://github.com/ds4linux/ds4linux.git
+git clone https://github.com/PalashDalsaniya/ds4linux.git
 cd ds4linux
 chmod +x scripts/install.sh
 ./scripts/install.sh
@@ -58,7 +58,7 @@ The install script will:
 2. Build the daemon.
 3. Install the binary to `/usr/bin/`.
 4. Copy the udev rules to `/etc/udev/rules.d/` and reload them.
-5. Ensure the `uinput` kernel module is loaded.
+5. Ensure the `uhid` kernel module is loaded.
 
 ### Manual Build
 
@@ -81,9 +81,9 @@ sudo cmake --install build --prefix /usr
 sudo cp config/99-ds4linux.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 
-# Load uinput module
-sudo modprobe uinput
-echo "uinput" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
+# Load uhid module
+sudo modprobe uhid
+echo "uhid" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
 ```
 
 
@@ -108,6 +108,27 @@ Press `Ctrl+C` to stop the daemon when you're done.
 ### 3. Launch Steam (or any other game launcher)
 
 For best compatibility, **open Steam after the daemon is running**. This ensures Steam only sees the virtual DS4 device and avoids conflicts with the daemon's exclusive grab on the physical controller.
+
+### Running as a service (optional)
+
+The packages install a systemd unit. To start the daemon automatically:
+
+```bash
+sudo systemctl enable --now ds4linux.service
+```
+
+Extra daemon options go in `/etc/default/ds4linux`, for example `DS4LINUX_ARGS=--generic`. Restart the service after changing it.
+
+### Generic (non-Sony) controllers
+
+ds4linux can also present other gamepads (Xbox, Logitech, 8BitDo, ...) as a virtual DualShock 4, so games show PlayStation button prompts. This is off by default because the daemon takes exclusive control of every controller it emulates:
+
+```bash
+sudo ds4linux-daemon --generic                  # every non-Sony gamepad
+sudo ds4linux-daemon --generic=046d:c21f        # only these VID:PID pairs (see `lsusb`)
+```
+
+Sticks, buttons, triggers, the D-pad and rumble are forwarded. Controllers without a touchpad or motion sensors report them as idle, and there is no lightbar. Pads with a switchable mode (e.g. Logitech F710) work best in XInput mode.
 
 
 ## Project Structure
