@@ -8,7 +8,6 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
-#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -19,8 +18,7 @@
 
 namespace ds4linux::daemon {
 
-static constexpr std::size_t kMaxClients    = 16;
-static constexpr int         kSendTimeoutMs = 200;
+static constexpr std::size_t kMaxClients = 16;
 
 struct IpcServer::Impl {
     int listen_fd = -1;
@@ -147,23 +145,11 @@ bool IpcServer::send(int client_fd, const std::string& json_payload) {
             sent += static_cast<std::size_t>(n);
             continue;
         }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            struct pollfd pfd{client_fd, POLLOUT, 0};
-            if (::poll(&pfd, 1, kSendTimeoutMs) > 0) continue;
-        } else if (n < 0 && errno == EINTR) {
-            continue;
-        }
+        if (n < 0 && errno == EINTR) continue;
         disconnect(client_fd);
         return false;
     }
     return true;
-}
-
-void IpcServer::broadcast(const std::string& json_payload) {
-    const auto fds = impl_->client_fds;  // send() may disconnect clients
-    for (int cfd : fds) {
-        send(cfd, json_payload);
-    }
 }
 
 bool IpcServer::is_client(int fd) const {

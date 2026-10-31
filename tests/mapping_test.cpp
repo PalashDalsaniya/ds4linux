@@ -63,6 +63,7 @@ int main() {
       Profile q = profile_from_json(profile_to_json(p));
       CHECK(q.name == p.name && q.output_mode == p.output_mode && q.rumble_strength == 0.25);
       CHECK(q.button_map == p.button_map); }
+    { Profile p = profile_from_json(R"({"output_mode":1})"); CHECK(p.name.empty() && !is_valid_profile_name(p.name)); }
     { bool threw = false; try { (void)profile_from_json("{oops"); } catch (const std::exception&) { threw = true; }
       CHECK(threw); }
     CHECK(is_valid_profile_name("Racing 2.0_v-1")); CHECK(!is_valid_profile_name(""));

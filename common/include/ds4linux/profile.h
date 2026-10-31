@@ -52,9 +52,14 @@ enum class DS4Button : std::uint8_t {
 };
 inline constexpr std::size_t kDS4ButtonCount = static_cast<std::size_t>(DS4Button::None);
 
-/// Lower-case name used in JSON and on the command line ("cross", "dpad_up").
+/// Lower-case names used in IPC responses and on the command line
+/// ("cross", "dpad_up"; "ds4", "x360"; "none", "circular", "square").
 [[nodiscard]] std::string_view to_string(DS4Button b) noexcept;
 [[nodiscard]] std::optional<DS4Button> ds4_button_from_string(std::string_view s) noexcept;
+[[nodiscard]] std::string_view to_string(OutputMode m) noexcept;
+[[nodiscard]] std::optional<OutputMode> output_mode_from_string(std::string_view s) noexcept;
+[[nodiscard]] std::string_view to_string(DeadzoneType t) noexcept;
+[[nodiscard]] std::optional<DeadzoneType> deadzone_type_from_string(std::string_view s) noexcept;
 
 // ── Button mapping: physical DS4 button → virtual DS4 button ─────────────────
 //    Buttons not in the map pass through unchanged.
@@ -87,7 +92,8 @@ struct Profile {
 [[nodiscard]] std::string profile_to_json(const Profile& p);
 
 /// Deserialise a JSON string into a Profile.  Out-of-range values are clamped
-/// and unknown keys ignored.  Throws std::runtime_error on malformed JSON.
+/// and unknown keys ignored; a missing name leaves `name` empty (which
+/// is_valid_profile_name rejects).  Throws std::runtime_error on malformed JSON.
 [[nodiscard]] Profile profile_from_json(const std::string& json);
 
 /// Profile names become file names: 1–64 characters from [A-Za-z0-9 _.-],

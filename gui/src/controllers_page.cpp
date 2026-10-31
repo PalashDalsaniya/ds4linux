@@ -1,15 +1,16 @@
 // ds4linux GUI — ControllersPage implementation
 
 #include "ds4linux/controllers_page.h"
+#include "ds4linux/gui_util.h"
 #include "ds4linux/ipc_client.h"
 
 #include <QColorDialog>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
-#include <QMessageBox>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QTableWidget>
@@ -19,12 +20,6 @@ namespace ds4linux::gui {
 
 namespace {
 enum Column { ColIndex, ColModel, ColConnection, ColBattery, ColOutput, ColProfile, ColCount };
-
-void showError(QWidget* parent, const QJsonObject& resp) {
-    if (resp.value("type").toString() == "Error") {
-        QMessageBox::warning(parent, "DS4Linux", resp.value("message").toString());
-    }
-}
 } // namespace
 
 ControllersPage::ControllersPage(IpcClient* ipc, QWidget* parent)
@@ -70,7 +65,7 @@ ControllersPage::ControllersPage(IpcClient* ipc, QWidget* parent)
         if (path.isEmpty()) return;
         ipc_->request("SetRumble", {{"device", path}, {"heavy", 200}, {"light", 200},
                                     {"duration_ms", 500}},
-                      [this](const QJsonObject& r) { showError(this, r); });
+                      [this](const QJsonObject& r) { showIpcError(this, r); });
     });
     connect(colorBtn_, &QPushButton::clicked, this, [this]() {
         const auto path = selectedPath();
@@ -79,7 +74,7 @@ ControllersPage::ControllersPage(IpcClient* ipc, QWidget* parent)
         if (!c.isValid()) return;
         ipc_->request("SetLightbarColor", {{"device", path}, {"r", c.red()},
                                            {"g", c.green()}, {"b", c.blue()}},
-                      [this](const QJsonObject& r) { showError(this, r); });
+                      [this](const QJsonObject& r) { showIpcError(this, r); });
     });
     connect(table_, &QTableWidget::itemSelectionChanged, this, [this]() {
         const bool any = !selectedPath().isEmpty();
@@ -111,13 +106,15 @@ QString ControllersPage::selectedPath() const {
 void ControllersPage::populate(const QJsonArray& devices) {
     // Rebuilding the rows would close an open profile drop-down, so when only
     // battery levels changed, update those in place.
-    QString key = profiles_.join('|');
+    QJsonArray withoutBattery;
     for (const auto& v : devices) {
-        const auto d = v.toObject();
-        key += '\n' + d.value("path").toString() + d.value("profile").toString() +
-               d.value("output_mode").toString() + d.value("connection").toString();
+        auto d = v.toObject();
+        d.remove("battery");
+        withoutBattery.append(d);
     }
-    const bool sameLayout = key == layoutKey_ && table_->rowCount() == devices.size();
+    const QString key = profiles_.join('|') + '\n' +
+                        QString::fromUtf8(QJsonDocument(withoutBattery).toJson(QJsonDocument::Compact));
+    const bool sameLayout = key == layoutKey_;
     layoutKey_ = key;
     devices_ = devices;
     emit devicesChanged(devices);
@@ -146,15 +143,15 @@ void ControllersPage::populate(const QJsonArray& devices) {
                               .arg(d.value("name").toString(), path, d.value("mac").toString()));
         table_->setItem(row, ColModel, model);
 
-        table_->setItem(row, ColConnection, new QTableWidgetItem(
-            d.value("connection").toString() == "bluetooth" ? "Bluetooth" : "USB"));
+        table_->setItem(row, ColConnection, new QTableWidgetItem(connectionLabel(d)));
 
         auto* bar = new QProgressBar;
         bar->setRange(0, 100);
         table_->setCellWidget(row, ColBattery, bar);
 
+        const auto mode = output_mode_from_string(d.value("output_mode").toString().toStdString());
         table_->setItem(row, ColOutput, new QTableWidgetItem(
-            d.value("output_mode").toString() == "x360" ? "Xbox 360" : "DualShock 4"));
+            outputModeLabel(mode.value_or(OutputMode::DS4))));
 
         auto* combo = new QComboBox;
         combo->addItems(profiles_);
@@ -163,7 +160,7 @@ void ControllersPage::populate(const QJsonArray& devices) {
         combo->setCurrentText(current);
         connect(combo, &QComboBox::activated, this, [this, combo, path]() {
             ipc_->request("SetActiveProfile", {{"device", path}, {"name", combo->currentText()}},
-                          [this](const QJsonObject& r) { showError(this, r); refresh(); });
+                          [this](const QJsonObject& r) { showIpcError(this, r); refresh(); });
         });
         table_->setCellWidget(row, ColProfile, combo);
 

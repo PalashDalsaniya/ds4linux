@@ -62,14 +62,15 @@ struct ControllerSlot {
     DS4InputState ds4_state;
     DS4InputState output_state;
 
-    // Rumble: last level requested by applications, and a test override
+    // Rumble: the applications' level, a test override that wins until
+    // test_rumble_until, and the level last sent to the motors (-1 = none)
     int game_heavy = 0, game_light = 0;
-    bool rumble_dirty = false;       // physical motors need an update
+    int test_heavy = 0, test_light = 0;
     std::chrono::steady_clock::time_point test_rumble_until{};
-    bool test_rumble_active = false;
+    int sent_heavy = -1, sent_light = -1;
+
     std::chrono::steady_clock::time_point next_battery_poll{};
     std::chrono::steady_clock::time_point last_motion_sync{};  // epoch = never
-    std::chrono::steady_clock::time_point opened_at{};
 
     Profile     profile;
     std::string controller_key;      // stable ID for profile assignment (MAC / sysfs path)
@@ -118,8 +119,9 @@ public:
     /// Returns false if there is no such slot.
     bool set_profile(const std::string& evdev_path, const Profile& p);
 
-    /// Re-apply a profile to every slot currently using a profile of that name.
-    void update_profile(const Profile& p);
+    /// Reload (via the profile resolver) every slot currently using the
+    /// profile `name` — after it was saved or deleted.
+    void reapply_profile(const std::string& name);
 
     void set_profile_resolver(ProfileResolver resolver) { resolver_ = std::move(resolver); }
 

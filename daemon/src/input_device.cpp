@@ -47,6 +47,17 @@ static std::uint32_t crc32_le(std::uint32_t crc, const std::uint8_t* data,
     return crc;
 }
 
+/// Sony Bluetooth output reports end with a CRC32 over a 0xA2 seed byte and
+/// the report itself (all but the last 4 bytes), stored little-endian.
+static void finish_bt_report(std::uint8_t* buf, std::size_t size) {
+    const std::uint8_t seed = 0xA2;
+    std::uint32_t crc = crc32_le(0xFFFFFFFFu, &seed, 1);
+    crc = ~crc32_le(crc, buf, size - 4);
+    for (std::size_t i = 0; i < 4; ++i) {
+        buf[size - 4 + i] = static_cast<std::uint8_t>(crc >> (8 * i));
+    }
+}
+
 // ── Pimpl ────────────────────────────────────────────────────────────────────
 
 struct InputDevice::Impl {
@@ -262,13 +273,7 @@ bool InputDevice::send_ds4_output() {
         buf[0] = 0x11;
         buf[1] = 0x80 | 0x40; // HWCTL_HID | HWCTL_CRC32
         fill_common(buf + 3);
-        std::uint8_t seed = 0xA2;
-        std::uint32_t crc = crc32_le(0xFFFFFFFFu, &seed, 1);
-        crc = ~crc32_le(crc, buf, sizeof(buf) - 4);
-        buf[74] = static_cast<std::uint8_t>(crc & 0xFF);
-        buf[75] = static_cast<std::uint8_t>((crc >> 8) & 0xFF);
-        buf[76] = static_cast<std::uint8_t>((crc >> 16) & 0xFF);
-        buf[77] = static_cast<std::uint8_t>((crc >> 24) & 0xFF);
+        finish_bt_report(buf, sizeof(buf));
         return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
     }
 
@@ -335,13 +340,7 @@ bool InputDevice::send_dualsense_output() {
         st.bt_seq = static_cast<std::uint8_t>((st.bt_seq + 1) & 0x0F);
         buf[2] = 0x10;
         fill_common(buf + 3);
-        std::uint8_t seed = 0xA2;
-        std::uint32_t crc = crc32_le(0xFFFFFFFFu, &seed, 1);
-        crc = ~crc32_le(crc, buf, sizeof(buf) - 4);
-        buf[74] = static_cast<std::uint8_t>(crc & 0xFF);
-        buf[75] = static_cast<std::uint8_t>((crc >> 8) & 0xFF);
-        buf[76] = static_cast<std::uint8_t>((crc >> 16) & 0xFF);
-        buf[77] = static_cast<std::uint8_t>((crc >> 24) & 0xFF);
+        finish_bt_report(buf, sizeof(buf));
         return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
     }
 
@@ -425,10 +424,6 @@ bool InputDevice::set_rumble(std::uint8_t heavy, std::uint8_t light) {
         impl_->ds4_out.light = light;
         return send_ds4_output();
     }
-}
-
-int InputDevice::battery_percent() const {
-    return battery().percent;
 }
 
 BatteryInfo InputDevice::battery() const {

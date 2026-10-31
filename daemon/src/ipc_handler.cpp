@@ -8,6 +8,7 @@
 #include "ds4linux/ipc_handler.h"
 #include "ds4linux/constants.h"
 #include "ds4linux/device_manager.h"
+#include "ds4linux/mapping.h"
 #include "ds4linux/profile_manager.h"
 
 #include <nlohmann/json.hpp>
@@ -25,14 +26,6 @@ namespace {
 struct RequestError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
-
-// The control socket is world-writable; bound what clients can make the
-// (root) daemon write to disk.
-constexpr std::size_t kMaxProfiles = 256;
-
-const char* output_mode_name(OutputMode m) {
-    return m == OutputMode::X360 ? "x360" : "ds4";
-}
 
 const char* battery_status_name(BatteryStatus s) {
     switch (s) {
@@ -71,17 +64,16 @@ json state_to_json(const DS4InputState& s) {
     for (const auto& t : s.touches) {
         touches.push_back({{"active", t.active}, {"id", t.id}, {"x", t.x}, {"y", t.y}});
     }
+    json buttons = json::object();  // every DS4Button, D-pad included
+    const ButtonSet pressed = pressed_buttons(s);
+    for (std::size_t i = 0; i < pressed.size(); ++i) {
+        buttons[std::string(to_string(static_cast<DS4Button>(i)))] = pressed[i];
+    }
     return {
         {"lx", s.lx}, {"ly", s.ly}, {"rx", s.rx}, {"ry", s.ry},
         {"l2", s.l2}, {"r2", s.r2},
         {"dpad", {{"x", s.hat_x}, {"y", s.hat_y}}},
-        {"buttons", {
-            {"cross", s.cross}, {"circle", s.circle}, {"square", s.square},
-            {"triangle", s.triangle}, {"l1", s.l1}, {"r1", s.r1},
-            {"l2", s.l2_btn}, {"r2", s.r2_btn}, {"share", s.share},
-            {"options", s.options}, {"l3", s.l3}, {"r3", s.r3},
-            {"ps", s.ps}, {"touchpad", s.touchpad},
-        }},
+        {"buttons", buttons},
         {"gyro",  {s.gyro_x, s.gyro_y, s.gyro_z}},
         {"accel", {s.accel_x, s.accel_y, s.accel_z}},
         {"touches", touches},
@@ -101,29 +93,29 @@ std::string IpcHandler::handle(const std::string& request) {
         if (!req.is_object()) throw RequestError("Request must be a JSON object");
         const std::string type = string_field(req, "type");
 
-        // Resolve the "device" selector to evdev paths
+        // Resolve the "device" selector to the controllers it names
         auto select = [&](bool first_only) {
-            const auto infos = devices_.device_info();
-            std::vector<std::string> paths;
-            if (!req.contains("device")) {
-                for (const auto& d : infos) paths.push_back(d.path);
-                if (first_only && !paths.empty()) paths.resize(1);
-            } else if (req["device"].is_number_integer()) {
-                const int idx = int_field(req, "device", 1, 64);
-                if (idx > static_cast<int>(infos.size())) {
-                    throw RequestError("No controller #" + std::to_string(idx));
+            auto infos = devices_.device_info();
+            if (req.contains("device")) {
+                std::vector<DeviceInfo>::iterator it;
+                if (req["device"].is_number_integer()) {
+                    const int idx = int_field(req, "device", 1, 64);
+                    if (idx > static_cast<int>(infos.size())) {
+                        throw RequestError("No controller #" + std::to_string(idx));
+                    }
+                    it = infos.begin() + (idx - 1);
+                } else {
+                    const auto path = string_field(req, "device");
+                    it = std::find_if(infos.begin(), infos.end(),
+                                      [&](const auto& d) { return d.path == path; });
+                    if (it == infos.end()) throw RequestError("No controller at " + path);
                 }
-                paths.push_back(infos[static_cast<std::size_t>(idx - 1)].path);
-            } else {
-                const auto path = string_field(req, "device");
-                if (std::none_of(infos.begin(), infos.end(),
-                                 [&](const auto& d) { return d.path == path; })) {
-                    throw RequestError("No controller at " + path);
-                }
-                paths.push_back(path);
+                infos = {std::move(*it)};
+            } else if (first_only && infos.size() > 1) {
+                infos.resize(1);
             }
-            if (paths.empty()) throw RequestError("No controllers connected");
-            return paths;
+            if (infos.empty()) throw RequestError("No controllers connected");
+            return infos;
         };
 
         if (type == "Ping") {
@@ -135,7 +127,7 @@ std::string IpcHandler::handle(const std::string& request) {
                 devs.push_back({
                     {"path", d.path}, {"name", d.name}, {"model", d.model},
                     {"connection", d.connection}, {"mac", d.mac},
-                    {"profile", d.profile}, {"output_mode", output_mode_name(d.output_mode)},
+                    {"profile", d.profile}, {"output_mode", to_string(d.output_mode)},
                     {"battery", {{"percent", d.battery.percent},
                                  {"status", battery_status_name(d.battery.status)}}},
                     {"touchpad", d.has_touchpad}, {"motion", d.has_motion},
@@ -151,15 +143,15 @@ std::string IpcHandler::handle(const std::string& request) {
             const auto r = static_cast<std::uint8_t>(int_field(req, "r", 0, 255));
             const auto g = static_cast<std::uint8_t>(int_field(req, "g", 0, 255));
             const auto b = static_cast<std::uint8_t>(int_field(req, "b", 0, 255));
-            for (const auto& path : select(false)) devices_.set_lightbar(path, r, g, b);
+            for (const auto& d : select(false)) devices_.set_lightbar(d.path, r, g, b);
             resp = {{"type", "Ok"}};
 
         } else if (type == "SetRumble") {
             const auto heavy = static_cast<std::uint8_t>(int_field(req, "heavy", 0, 255));
             const auto light = static_cast<std::uint8_t>(int_field(req, "light", 0, 255));
             const int  ms    = int_field(req, "duration_ms", 0, 5000, 500);
-            for (const auto& path : select(false)) {
-                devices_.test_rumble(path, heavy, light, std::chrono::milliseconds(ms));
+            for (const auto& d : select(false)) {
+                devices_.test_rumble(d.path, heavy, light, std::chrono::milliseconds(ms));
             }
             resp = {{"type", "Ok"}};
 
@@ -174,47 +166,32 @@ std::string IpcHandler::handle(const std::string& request) {
             if (!req.contains("profile") || !req["profile"].is_object()) {
                 throw RequestError("Missing object field: profile");
             }
-            // Require an explicit name: a nameless profile would otherwise
-            // default to "Default" and silently overwrite it
-            const auto& body = req["profile"];
-            if (!body.contains("name") || !body["name"].is_string()) {
-                throw RequestError("The profile has no name");
-            }
-            const Profile p = profile_from_json(body.dump());
+            const Profile p = profile_from_json(req["profile"].dump());
             if (!is_valid_profile_name(p.name)) {
-                throw RequestError("Invalid profile name (use letters, digits, space, _ . -)");
-            }
-            const auto existing = profiles_.list();
-            if (std::find(existing.begin(), existing.end(), p.name) == existing.end() &&
-                existing.size() >= kMaxProfiles) {
-                throw RequestError("Too many profiles (limit " + std::to_string(kMaxProfiles) + ")");
+                throw RequestError(p.name.empty()
+                    ? "The profile has no name"
+                    : "Invalid profile name (use letters, digits, space, _ . -)");
             }
             profiles_.save(p);
-            devices_.update_profile(p);
+            devices_.reapply_profile(p.name);
             resp = {{"type", "Ok"}};
 
         } else if (type == "DeleteProfile") {
             const auto name = string_field(req, "name");
-            profiles_.remove(name);
-            const Profile def = profiles_.load(std::string(kDefaultProfile));
-            for (const auto& d : devices_.device_info()) {
-                if (d.profile == name) devices_.set_profile(d.path, def);
-            }
+            profiles_.remove(name);          // also drops its assignments
+            devices_.reapply_profile(name);  // so those controllers get Default
             resp = {{"type", "Ok"}};
 
         } else if (type == "SetActiveProfile") {
             const auto p = profiles_.load(string_field(req, "name"));
-            const auto infos = devices_.device_info();
-            for (const auto& path : select(false)) {
-                for (const auto& d : infos) {
-                    if (d.path == path) profiles_.assign(d.controller_key, p.name);
-                }
-                devices_.set_profile(path, p);
+            for (const auto& d : select(false)) {
+                profiles_.assign(d.controller_key, p.name);
+                devices_.set_profile(d.path, p);
             }
             resp = {{"type", "Ok"}};
 
         } else if (type == "GetInputState") {
-            const auto path  = select(true).front();
+            const auto path  = select(true).front().path;
             const auto state = devices_.input_state(path);
             if (!state) throw RequestError("No controller at " + path);
             resp = {{"type", "InputState"}, {"path", path},

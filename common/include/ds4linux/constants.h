@@ -35,7 +35,7 @@ inline constexpr std::string_view kDefaultProfile    = "Default";
 
 // ── Polling ──────────────────────────────────────────────────────────────────
 inline constexpr int kEpollMaxEvents = 16;
-inline constexpr int kEpollTimeoutMs = -1; // block until event
+inline constexpr int kEpollTimeoutMs = 200; // also bounds timer latency
 
 // ── Lightbar defaults ────────────────────────────────────────────────────────
 inline constexpr std::uint8_t kDefaultLedR = 0x00;

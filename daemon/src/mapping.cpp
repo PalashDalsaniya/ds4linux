@@ -57,11 +57,9 @@ static void apply_trigger_deadzone(std::uint8_t& t, const DeadzoneParams& dz) {
 
 // ── Button remapping ─────────────────────────────────────────────────────────
 
-using ButtonSet = std::array<bool, kDS4ButtonCount>;
-
 static bool& at(ButtonSet& s, DS4Button b) { return s[static_cast<std::size_t>(b)]; }
 
-static ButtonSet read_buttons(const DS4InputState& s) {
+ButtonSet pressed_buttons(const DS4InputState& s) {
     ButtonSet b{};
     at(b, DS4Button::Cross)    = s.cross;
     at(b, DS4Button::Circle)   = s.circle;
@@ -106,7 +104,7 @@ static void write_buttons(DS4InputState& s, ButtonSet& b) {
 static void apply_button_map(DS4InputState& s, const ButtonMap& map) {
     if (map.empty()) return;
 
-    const ButtonSet in = read_buttons(s);
+    const ButtonSet in = pressed_buttons(s);
     ButtonSet out{};
     auto target_of = [&](DS4Button b) {
         auto it = map.find(b);

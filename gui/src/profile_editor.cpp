@@ -1,10 +1,10 @@
 // ds4linux GUI — ProfileEditor implementation
 
 #include "ds4linux/profile_editor.h"
+#include "ds4linux/constants.h"
+#include "ds4linux/gui_util.h"
 #include "ds4linux/ipc_client.h"
 #include "ds4linux/led_picker.h"
-
-#include <ds4linux/profile.h>
 
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -15,6 +15,7 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
@@ -38,14 +39,16 @@ const char* const kButtonLabels[] = {
 };
 static_assert(std::size(kButtonLabels) == kDS4ButtonCount);
 
-QString buttonId(std::size_t i) {
-    return QString::fromLatin1(to_string(static_cast<DS4Button>(i)).data());
+const QString kDefaultName = toQString(kDefaultProfile);
+
+// Profiles cross the IPC boundary as JSON objects; convert with the shared
+// (validating) serialiser so the GUI never hand-maintains the schema.
+Profile fromJson(const QJsonObject& o) {
+    return profile_from_json(QJsonDocument(o).toJson(QJsonDocument::Compact).toStdString());
 }
 
-bool isError(QWidget* parent, const QJsonObject& r) {
-    if (r.value("type").toString() != "Error") return false;
-    QMessageBox::warning(parent, "DS4Linux", r.value("message").toString());
-    return true;
+QJsonObject toJson(const Profile& p) {
+    return QJsonDocument::fromJson(QByteArray::fromStdString(profile_to_json(p))).object();
 }
 
 } // namespace
@@ -80,8 +83,9 @@ ProfileEditor::ProfileEditor(IpcClient* ipc, QWidget* parent)
     auto* general = new QGroupBox("General", editor_);
     auto* gl = new QFormLayout(general);
     output_ = new QComboBox(general);
-    output_->addItem("DualShock 4", 0);
-    output_->addItem("Xbox 360", 1);
+    for (auto m : {OutputMode::DS4, OutputMode::X360}) {
+        output_->addItem(outputModeLabel(m), static_cast<int>(m));
+    }
     output_->setToolTip("Which virtual controller games see");
     gl->addRow("Emulated controller", output_);
     lightbar_ = new LedPicker(general);
@@ -135,9 +139,9 @@ ProfileEditor::ProfileEditor(IpcClient* ipc, QWidget* parent)
         auto* target = new QComboBox;
         for (std::size_t t = 0; t < kDS4ButtonCount; ++t) {
             target->addItem(t == i ? QString("%1 (default)").arg(kButtonLabels[t])
-                                   : QString(kButtonLabels[t]), buttonId(t));
+                                   : QString(kButtonLabels[t]), static_cast<int>(t));
         }
-        target->addItem("Disabled", "none");
+        target->addItem("Disabled", static_cast<int>(DS4Button::None));
         target->setCurrentIndex(static_cast<int>(i));
         connect(target, &QComboBox::currentIndexChanged, this, [this]() { setDirty(true); });
         remap_->setCellWidget(static_cast<int>(i), 1, target);
@@ -201,9 +205,9 @@ ProfileEditor::DeadzoneControls ProfileEditor::makeDeadzone(bool stick) {
     DeadzoneControls c;
     if (stick) {
         c.type = new QComboBox(this);
-        c.type->addItem("None", 0);
-        c.type->addItem("Circular", 1);
-        c.type->addItem("Square", 2);
+        c.type->addItem("None", static_cast<int>(DeadzoneType::None));
+        c.type->addItem("Circular", static_cast<int>(DeadzoneType::Circular));
+        c.type->addItem("Square", static_cast<int>(DeadzoneType::Square));
         connect(c.type, &QComboBox::currentIndexChanged, this, [this]() { setDirty(true); });
     }
     auto spin = [&](double min, double max) {
@@ -219,19 +223,23 @@ ProfileEditor::DeadzoneControls ProfileEditor::makeDeadzone(bool stick) {
     return c;
 }
 
-void ProfileEditor::setDeadzone(const DeadzoneControls& c, const QJsonObject& dz) const {
-    if (c.type) c.type->setCurrentIndex(dz.value("type").toInt(1));
-    c.inner->setValue(dz.value("inner").toDouble(0) * 100.0);
-    c.outer->setValue(dz.value("outer").toDouble(1) * 100.0);
+void ProfileEditor::setDeadzone(const DeadzoneControls& c, const DeadzoneParams& dz) const {
+    if (c.type) c.type->setCurrentIndex(c.type->findData(static_cast<int>(dz.type)));
+    c.inner->setValue(dz.inner * 100.0);
+    c.outer->setValue(dz.outer * 100.0);
 }
 
-QJsonObject ProfileEditor::getDeadzone(const DeadzoneControls& c) const {
-    const double inner = c.inner->value() / 100.0;
-    const double outer = std::max(c.outer->value() / 100.0, inner + 0.05);
-    int type = 1;
-    if (c.type) type = c.type->currentData().toInt();
-    else if (inner <= 0.0 && outer >= 1.0) type = 0;  // triggers: no deadzone
-    return {{"type", type}, {"inner", inner}, {"outer", std::min(outer, 1.0)}};
+DeadzoneParams ProfileEditor::getDeadzone(const DeadzoneControls& c) const {
+    DeadzoneParams dz;
+    dz.inner = c.inner->value() / 100.0;
+    dz.outer = c.outer->value() / 100.0;  // validated / fixed up by the daemon
+    if (c.type) {
+        dz.type = static_cast<DeadzoneType>(c.type->currentData().toInt());
+    } else {
+        // Triggers have no type control: off unless a range is set
+        dz.type = dz.inner > 0 || dz.outer < 1 ? DeadzoneType::Circular : DeadzoneType::None;
+    }
+    return dz;
 }
 
 void ProfileEditor::refreshProfileList() {
@@ -255,67 +263,69 @@ void ProfileEditor::refreshProfileList() {
 void ProfileEditor::loadProfile(const QString& name) {
     if (name.isEmpty()) return;
     ipc_->request("LoadProfile", {{"name", name}}, [this](const QJsonObject& r) {
-        if (isError(this, r)) return;
-        showProfile(r.value("profile").toObject());
+        if (showIpcError(this, r)) return;
+        showProfile(fromJson(r.value("profile").toObject()));
     });
 }
 
-void ProfileEditor::showProfile(const QJsonObject& p) {
+void ProfileEditor::showProfile(const Profile& p) {
     loading_ = true;
-    current_ = p.value("name").toString();
+    current_ = QString::fromStdString(p.name);
     title_->setText(current_);
-    output_->setCurrentIndex(p.value("output_mode").toInt(0) == 1 ? 1 : 0);
-    const auto c = p.value("lightbar_color").toObject();
-    lightbar_->setColor(QColor(c.value("r").toInt(0), c.value("g").toInt(0), c.value("b").toInt(255)));
-    rumble_->setValue(qRound(p.value("rumble_strength").toDouble(1.0) * 100.0));
+    output_->setCurrentIndex(output_->findData(static_cast<int>(p.output_mode)));
+    lightbar_->setColor(QColor(p.lightbar_color.r, p.lightbar_color.g, p.lightbar_color.b));
+    rumble_->setValue(qRound(p.rumble_strength * 100.0));
     rumbleLbl_->setText(QString("%1%").arg(rumble_->value()));
-    setDeadzone(leftStick_,  p.value("left_stick_dz").toObject());
-    setDeadzone(rightStick_, p.value("right_stick_dz").toObject());
-    setDeadzone(l2_, p.value("left_trigger_dz").toObject());
-    setDeadzone(r2_, p.value("right_trigger_dz").toObject());
+    setDeadzone(leftStick_,  p.left_stick_dz);
+    setDeadzone(rightStick_, p.right_stick_dz);
+    setDeadzone(l2_, p.left_trigger_dz);
+    setDeadzone(r2_, p.right_trigger_dz);
 
-    const auto map = p.value("button_map").toObject();
     for (int i = 0; i < remap_->rowCount(); ++i) {
         auto* combo = qobject_cast<QComboBox*>(remap_->cellWidget(i, 1));
-        const auto target = map.value(buttonId(static_cast<std::size_t>(i))).toString();
-        const int idx = target.isEmpty() ? i : combo->findData(target);
+        const auto it = p.button_map.find(static_cast<DS4Button>(i));
+        const int idx = it == p.button_map.end() ? i : combo->findData(static_cast<int>(it->second));
         combo->setCurrentIndex(idx >= 0 ? idx : i);
     }
 
-    deleteBtn_->setEnabled(current_ != "Default");
+    deleteBtn_->setEnabled(current_ != kDefaultName);
     editor_->setEnabled(true);
     loading_ = false;
     setDirty(false);
 }
 
-QJsonObject ProfileEditor::collect() const {
+Profile ProfileEditor::collect() const {
+    Profile p;
+    p.name        = current_.toStdString();
+    p.output_mode = static_cast<OutputMode>(output_->currentData().toInt());
     const QColor c = lightbar_->currentColor();
-    QJsonObject map;
+    p.lightbar_color = {static_cast<std::uint8_t>(c.red()), static_cast<std::uint8_t>(c.green()),
+                        static_cast<std::uint8_t>(c.blue())};
+    p.rumble_strength  = rumble_->value() / 100.0;
+    p.left_stick_dz    = getDeadzone(leftStick_);
+    p.right_stick_dz   = getDeadzone(rightStick_);
+    p.left_trigger_dz  = getDeadzone(l2_);
+    p.right_trigger_dz = getDeadzone(r2_);
     for (int i = 0; i < remap_->rowCount(); ++i) {
         auto* combo = qobject_cast<QComboBox*>(remap_->cellWidget(i, 1));
         if (combo->currentIndex() != i) {
-            map[buttonId(static_cast<std::size_t>(i))] = combo->currentData().toString();
+            p.button_map[static_cast<DS4Button>(i)] =
+                static_cast<DS4Button>(combo->currentData().toInt());
         }
     }
-    return {
-        {"name", current_},
-        {"output_mode", output_->currentData().toInt()},
-        {"lightbar_color", QJsonObject{{"r", c.red()}, {"g", c.green()}, {"b", c.blue()}}},
-        {"rumble_strength", rumble_->value() / 100.0},
-        {"left_stick_dz", getDeadzone(leftStick_)},
-        {"right_stick_dz", getDeadzone(rightStick_)},
-        {"left_trigger_dz", getDeadzone(l2_)},
-        {"right_trigger_dz", getDeadzone(r2_)},
-        {"button_map", map},
-    };
+    return p;
+}
+
+void ProfileEditor::saveProfile(const Profile& p, const std::function<void()>& onSaved) {
+    ipc_->request("SaveProfile", {{"profile", toJson(p)}}, [this, onSaved](const QJsonObject& r) {
+        if (showIpcError(this, r)) return;
+        onSaved();
+    });
 }
 
 void ProfileEditor::save() {
     if (current_.isEmpty()) return;
-    ipc_->request("SaveProfile", {{"profile", collect()}}, [this](const QJsonObject& r) {
-        if (isError(this, r)) return;
-        setDirty(false);
-    });
+    saveProfile(collect(), [this]() { setDirty(false); });
 }
 
 void ProfileEditor::createProfile(bool copyCurrent) {
@@ -334,10 +344,9 @@ void ProfileEditor::createProfile(bool copyCurrent) {
         return;
     }
 
-    auto saveAs = [this, name](QJsonObject p) {
-        p["name"] = name;
-        ipc_->request("SaveProfile", {{"profile", p}}, [this, name](const QJsonObject& r) {
-            if (isError(this, r)) return;
+    auto saveAs = [this, name](Profile p) {
+        p.name = name.toStdString();
+        saveProfile(p, [this, name]() {
             current_ = name;
             dirty_ = false;
             refreshProfileList();
@@ -346,21 +355,22 @@ void ProfileEditor::createProfile(bool copyCurrent) {
     if (copyCurrent && !current_.isEmpty()) {
         saveAs(collect());
     } else {
-        ipc_->request("LoadProfile", {{"name", "Default"}}, [saveAs](const QJsonObject& r) {
-            saveAs(r.value("profile").toObject());
+        ipc_->request("LoadProfile", {{"name", kDefaultName}}, [this, saveAs](const QJsonObject& r) {
+            if (showIpcError(this, r)) return;
+            saveAs(fromJson(r.value("profile").toObject()));
         });
     }
 }
 
 void ProfileEditor::deleteProfile() {
-    if (current_.isEmpty() || current_ == "Default") return;
+    if (current_.isEmpty() || current_ == kDefaultName) return;
     if (QMessageBox::question(this, "DS4Linux",
                               QString("Delete profile \"%1\"? Controllers using it switch to Default.")
                                   .arg(current_)) != QMessageBox::Yes) {
         return;
     }
     ipc_->request("DeleteProfile", {{"name", current_}}, [this](const QJsonObject& r) {
-        if (isError(this, r)) return;
+        if (showIpcError(this, r)) return;
         current_.clear();
         dirty_ = false;
         refreshProfileList();

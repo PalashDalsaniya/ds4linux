@@ -1,6 +1,8 @@
 // ds4linux GUI — TesterPage / ControllerView implementation
 
 #include "ds4linux/tester_page.h"
+#include "ds4linux/constants.h"
+#include "ds4linux/gui_util.h"
 #include "ds4linux/ipc_client.h"
 
 #include <QButtonGroup>
@@ -83,8 +85,8 @@ void ControllerView::paintEvent(QPaintEvent*) {
     for (int i = 0; i < touches.size(); ++i) {
         const auto t = touches[i].toObject();
         if (!t.value("active").toBool()) continue;
-        const QPointF pt(pad.left() + pad.width() * t.value("x").toInt() / 1919.0,
-                         pad.top() + pad.height() * t.value("y").toInt() / 941.0);
+        const QPointF pt(pad.left() + pad.width() * t.value("x").toInt() / double(kDS4TouchpadMaxX),
+                         pad.top() + pad.height() * t.value("y").toInt() / double(kDS4TouchpadMaxY));
         p.setPen(Qt::NoPen);
         p.setBrush(i == 0 ? QColor(255, 170, 0) : QColor(0, 220, 140));
         p.drawEllipse(pt, 7, 7);
@@ -204,28 +206,29 @@ TesterPage::TesterPage(IpcClient* ipc, QWidget* parent)
 
 void TesterPage::setDevices(const QJsonArray& devices) {
     // Called on every controller refresh; only rebuild the chooser (which
-    // would close it if open) when the set of controllers changed.
-    QString key;
-    for (const auto& v : devices) {
-        const auto d = v.toObject();
-        key += d.value("path").toString() + d.value("model").toString() +
-               d.value("connection").toString() + '\n';
-    }
-    if (key == devicesKey_ && device_->count() == devices.size()) return;
-    devicesKey_ = key;
-
-    const QString selected = device_->currentData().toString();
-    QSignalBlocker block(device_);
-    device_->clear();
+    // would close it if open) when its entries would change.
+    QStringList labels, paths;
     for (int i = 0; i < devices.size(); ++i) {
         const auto d = devices[i].toObject();
-        device_->addItem(QString("%1. %2 (%3)").arg(i + 1)
-                             .arg(d.value("model").toString(),
-                                  d.value("connection").toString() == "bluetooth" ? "Bluetooth" : "USB"),
-                         d.value("path").toString());
+        labels << QString("%1. %2 (%3)").arg(i + 1).arg(d.value("model").toString(),
+                                                        connectionLabel(d));
+        paths << d.value("path").toString();
     }
-    const int idx = device_->findData(selected);
-    if (idx >= 0) device_->setCurrentIndex(idx);
+    QStringList current, currentPaths;
+    for (int i = 0; i < device_->count(); ++i) {
+        current << device_->itemText(i);
+        currentPaths << device_->itemData(i).toString();
+    }
+
+    if (labels != current || paths != currentPaths) {
+        const QString selected = device_->currentData().toString();
+        QSignalBlocker block(device_);
+        device_->clear();
+        for (int i = 0; i < labels.size(); ++i) device_->addItem(labels[i], paths[i]);
+        const int idx = device_->findData(selected);
+        if (idx >= 0) device_->setCurrentIndex(idx);
+    }
+
     const bool any = !devices.isEmpty();
     hint_->setVisible(!any);
     pad_->setEnabled(any);

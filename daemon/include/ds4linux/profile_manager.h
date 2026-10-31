@@ -21,7 +21,8 @@ public:
     [[nodiscard]] Profile load(const std::string& name) const;
 
     /// Save a profile (atomically writes <profiles_dir>/<name>.json).
-    /// Throws std::runtime_error on an invalid name or I/O failure.
+    /// Throws std::runtime_error on an invalid name, when creating it would
+    /// exceed the profile limit, or on I/O failure.
     void save(const Profile& p) const;
 
     /// List all available profile names (always includes "Default").
@@ -46,8 +47,8 @@ private:
     void load_assignments();
     void save_assignments() const;
 
-    std::string state_dir_;
     std::string profiles_dir_;
+    std::string assignments_path_;
     std::unordered_map<std::string, std::string> assignments_;
 };
 

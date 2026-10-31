@@ -34,6 +34,32 @@ std::optional<DS4Button> ds4_button_from_string(std::string_view s) noexcept {
     return std::nullopt;
 }
 
+std::string_view to_string(OutputMode m) noexcept {
+    return m == OutputMode::X360 ? "x360" : "ds4";
+}
+
+std::optional<OutputMode> output_mode_from_string(std::string_view s) noexcept {
+    if (s == "ds4")  return OutputMode::DS4;
+    if (s == "x360") return OutputMode::X360;
+    return std::nullopt;
+}
+
+std::string_view to_string(DeadzoneType t) noexcept {
+    switch (t) {
+    case DeadzoneType::None:     return "none";
+    case DeadzoneType::Circular: return "circular";
+    case DeadzoneType::Square:   return "square";
+    }
+    return "none";
+}
+
+std::optional<DeadzoneType> deadzone_type_from_string(std::string_view s) noexcept {
+    for (auto t : {DeadzoneType::None, DeadzoneType::Circular, DeadzoneType::Square}) {
+        if (to_string(t) == s) return t;
+    }
+    return std::nullopt;
+}
+
 bool is_valid_profile_name(std::string_view name) noexcept {
     if (name.empty() || name.size() > 64) return false;
     if (name.front() == '.' || name.front() == ' ') return false;
@@ -132,7 +158,7 @@ Profile profile_from_json(const std::string& raw) {
 
     const Profile def;
     Profile p;
-    if (j.contains("name") && j["name"].is_string()) p.name = j["name"].get<std::string>();
+    p.name = j.contains("name") && j["name"].is_string() ? j["name"].get<std::string>() : "";
     p.output_mode = static_cast<OutputMode>(
         static_cast<int>(get_number(j, "output_mode", 0, 0, 1)));
     if (j.contains("lightbar_color"))

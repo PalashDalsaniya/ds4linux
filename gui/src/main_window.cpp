@@ -1,12 +1,12 @@
 // ds4linux GUI — MainWindow implementation
 
 #include "ds4linux/main_window.h"
-#include "ds4linux/constants.h"
 #include "ds4linux/controllers_page.h"
 #include "ds4linux/ipc_client.h"
 #include "ds4linux/profile_editor.h"
 #include "ds4linux/tester_page.h"
 
+#include <QCoreApplication>
 #include <QJsonObject>
 #include <QLabel>
 #include <QStatusBar>
@@ -86,8 +86,7 @@ void MainWindow::onConnected() {
     ipc_->request("Ping", {}, [this](const QJsonObject& r) {
         statusBar()->showMessage(QString("Connected to ds4linux daemon %1 · GUI %2")
                                      .arg(r.value("version").toString(),
-                                          QString::fromLatin1(kVersion.data(),
-                                                              static_cast<qsizetype>(kVersion.size()))));
+                                          QCoreApplication::applicationVersion()));
     });
     profiles_->refreshProfileList();
     controllers_->refresh();

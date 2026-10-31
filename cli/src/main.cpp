@@ -65,12 +65,14 @@ Profiles:
   profile import <FILE>              Save a profile from a JSON file
   profile export <NAME> [FILE]       Write a profile as JSON (stdout by default)
 
-Buttons: cross circle square triangle l1 r1 l2 r2 share options l3 r3 ps
-         touchpad dpad_up dpad_down dpad_left dpad_right
-
 Other:
   ping                               Check that the daemon is running
-)";
+
+Buttons:)";
+    for (std::size_t i = 0; i < kDS4ButtonCount; ++i) {
+        std::cout << ' ' << to_string(static_cast<DS4Button>(i));
+    }
+    std::cout << "\n";
 }
 
 // ── Daemon connection ────────────────────────────────────────────────────────
@@ -162,11 +164,18 @@ std::vector<std::string> split(const std::string& s, char sep) {
     return out;
 }
 
-void require_button(const std::string& name, bool allow_none) {
+DS4Button parse_button(const std::string& name, bool allow_none) {
     auto b = ds4_button_from_string(name);
     if (!b || (!allow_none && *b == DS4Button::None)) {
         throw UsageError("Unknown button: " + name);
     }
+    return *b;
+}
+
+/// Add the -d/--device selector to a request, if one was given.
+json with_device(json req, const json& device) {
+    if (!device.is_null()) req["device"] = device;
+    return req;
 }
 
 std::string read_text_file(const std::string& path) {
@@ -201,35 +210,39 @@ void cmd_list(Client& c) {
     }
 }
 
+Profile fetch_profile(Client& c, const std::string& name) {
+    return profile_from_json(c.request({{"type", "LoadProfile"}, {"name", name}})["profile"].dump());
+}
+
+void save_profile(Client& c, const Profile& p) {
+    c.request({{"type", "SaveProfile"}, {"profile", json::parse(profile_to_json(p))}});
+}
+
 /// Fetch, modify and save a profile.
 template <typename F>
 void edit_profile(Client& c, const std::string& name, F&& change) {
-    json p = c.request({{"type", "LoadProfile"}, {"name", name}})["profile"];
+    Profile p = fetch_profile(c, name);
     change(p);
-    p["name"] = name;
-    c.request({{"type", "SaveProfile"}, {"profile", p}});
+    p.name = name;
+    save_profile(c, p);
 }
 
-json parse_deadzone(const std::string& value, bool stick, const json& current) {
+DeadzoneParams parse_deadzone(const std::string& value, bool stick, DeadzoneParams dz) {
     const auto parts = split(value, ',');
     if (parts.empty() || parts.size() > (stick ? 3u : 2u)) {
         throw UsageError(stick ? "Use INNER[,OUTER[,circular|square|none]]"
                                : "Use INNER[,OUTER]");
     }
-    json dz = current.is_object() ? current : json::object();
-    dz["inner"] = parse_int(parts[0], 0, 95, "Inner deadzone") / 100.0;
-    if (parts.size() > 1) dz["outer"] = parse_int(parts[1], 5, 100, "Outer deadzone") / 100.0;
-    else if (!dz.contains("outer")) dz["outer"] = 1.0;
+    dz.inner = parse_int(parts[0], 0, 95, "Inner deadzone") / 100.0;
+    if (parts.size() > 1) dz.outer = parse_int(parts[1], 5, 100, "Outer deadzone") / 100.0;
     if (stick && parts.size() > 2) {
-        const auto& t = parts[2];
-        if (t == "none") dz["type"] = 0;
-        else if (t == "circular") dz["type"] = 1;
-        else if (t == "square") dz["type"] = 2;
-        else throw UsageError("Deadzone type must be circular, square or none");
+        auto type = deadzone_type_from_string(parts[2]);
+        if (!type) throw UsageError("Deadzone type must be circular, square or none");
+        dz.type = *type;
     } else if (!stick) {
-        dz["type"] = dz["inner"].get<double>() > 0 || dz["outer"].get<double>() < 1 ? 1 : 0;
-    } else if (!dz.contains("type") || dz["type"] == 0) {
-        dz["type"] = 1;
+        dz.type = dz.inner > 0 || dz.outer < 1 ? DeadzoneType::Circular : DeadzoneType::None;
+    } else if (dz.type == DeadzoneType::None) {
+        dz.type = DeadzoneType::Circular;
     }
     return dz;
 }
@@ -251,9 +264,7 @@ void cmd_profile(Client& c, const std::vector<std::string>& a, const json& devic
         std::cout << c.request({{"type", "LoadProfile"}, {"name", a[1]}})["profile"].dump(4) << "\n";
     } else if (sub == "use") {
         need(1);
-        json req = {{"type", "SetActiveProfile"}, {"name", a[1]}};
-        if (!device.is_null()) req["device"] = device;
-        c.request(req);
+        c.request(with_device({{"type", "SetActiveProfile"}, {"name", a[1]}}, device));
         std::cout << "Using profile \"" << a[1] << "\"\n";
     } else if (sub == "new") {
         need(1);
@@ -264,9 +275,9 @@ void cmd_profile(Client& c, const std::vector<std::string>& a, const json& devic
         for (const auto& n : names) {
             if (n == a[1]) throw std::runtime_error("Profile \"" + a[1] + "\" already exists");
         }
-        json p = c.request({{"type", "LoadProfile"}, {"name", base}})["profile"];
-        p["name"] = a[1];
-        c.request({{"type", "SaveProfile"}, {"profile", p}});
+        Profile p = fetch_profile(c, base);
+        p.name = a[1];
+        save_profile(c, p);
         std::cout << "Created profile \"" << a[1] << "\" from \"" << base << "\"\n";
     } else if (sub == "delete") {
         need(1);
@@ -276,22 +287,24 @@ void cmd_profile(Client& c, const std::vector<std::string>& a, const json& devic
         need(3);
         const auto& key = a[2];
         const auto& value = a[3];
-        edit_profile(c, a[1], [&](json& p) {
+        edit_profile(c, a[1], [&](Profile& p) {
             if (key == "output") {
-                if (value == "ds4") p["output_mode"] = 0;
-                else if (value == "x360") p["output_mode"] = 1;
-                else throw UsageError("Output must be ds4 or x360");
+                auto mode = output_mode_from_string(value);
+                if (!mode) throw UsageError("Output must be ds4 or x360");
+                p.output_mode = *mode;
             } else if (key == "lightbar") {
                 const auto rgb = parse_hex_color(value);
-                p["lightbar_color"] = {{"r", rgb[0]}, {"g", rgb[1]}, {"b", rgb[2]}};
+                p.lightbar_color = {static_cast<std::uint8_t>(rgb[0]),
+                                    static_cast<std::uint8_t>(rgb[1]),
+                                    static_cast<std::uint8_t>(rgb[2])};
             } else if (key == "rumble") {
-                p["rumble_strength"] = parse_int(value, 0, 100, "Rumble") / 100.0;
+                p.rumble_strength = parse_int(value, 0, 100, "Rumble") / 100.0;
             } else if (key == "left-stick" || key == "right-stick") {
-                const char* k = key == "left-stick" ? "left_stick_dz" : "right_stick_dz";
-                p[k] = parse_deadzone(value, true, p.value(k, json::object()));
+                auto& dz = key == "left-stick" ? p.left_stick_dz : p.right_stick_dz;
+                dz = parse_deadzone(value, true, dz);
             } else if (key == "l2" || key == "r2") {
-                const char* k = key == "l2" ? "left_trigger_dz" : "right_trigger_dz";
-                p[k] = parse_deadzone(value, false, p.value(k, json::object()));
+                auto& dz = key == "l2" ? p.left_trigger_dz : p.right_trigger_dz;
+                dz = parse_deadzone(value, false, dz);
             } else {
                 throw UsageError("Unknown setting: " + key);
             }
@@ -299,16 +312,14 @@ void cmd_profile(Client& c, const std::vector<std::string>& a, const json& devic
         std::cout << "Updated \"" << a[1] << "\"\n";
     } else if (sub == "remap") {
         need(3);
-        require_button(a[2], false);
-        require_button(a[3], true);
-        edit_profile(c, a[1], [&](json& p) { p["button_map"][a[2]] = a[3]; });
+        const DS4Button from = parse_button(a[2], false);
+        const DS4Button to   = parse_button(a[3], true);
+        edit_profile(c, a[1], [&](Profile& p) { p.button_map[from] = to; });
         std::cout << "Remapped " << a[2] << " -> " << a[3] << " in \"" << a[1] << "\"\n";
     } else if (sub == "unmap") {
         need(2);
-        require_button(a[2], false);
-        edit_profile(c, a[1], [&](json& p) {
-            if (p.contains("button_map")) p["button_map"].erase(a[2]);
-        });
+        const DS4Button from = parse_button(a[2], false);
+        edit_profile(c, a[1], [&](Profile& p) { p.button_map.erase(from); });
         std::cout << "Removed remap of " << a[2] << " in \"" << a[1] << "\"\n";
     } else if (sub == "import") {
         need(1);
@@ -349,11 +360,6 @@ void print_state(const json& s, const char* title) {
     for (const auto& [name, val] : b.items()) {
         if (val.get<bool>()) pressed += name + " ";
     }
-    const int dx = s["dpad"]["x"], dy = s["dpad"]["y"];
-    if (dy < 0) pressed += "dpad_up ";
-    if (dy > 0) pressed += "dpad_down ";
-    if (dx < 0) pressed += "dpad_left ";
-    if (dx > 0) pressed += "dpad_right ";
 
     std::printf("\033[1m%s\033[0m\033[K\n", title);
     std::printf("  left stick   %s     right stick  %s\033[K\n",
@@ -366,8 +372,7 @@ void print_state(const json& s, const char* title) {
 
 void cmd_test(Client& c, const json& device) {
     std::signal(SIGINT, [](int) { g_stop = 1; });
-    json req = {{"type", "GetInputState"}};
-    if (!device.is_null()) req["device"] = device;
+    const json req = with_device({{"type", "GetInputState"}}, device);
 
     bool first = true;
     while (!g_stop) {
@@ -445,10 +450,6 @@ int main(int argc, char** argv) {
         Client client(socket_path);
         const auto& cmd = args[0];
         const std::vector<std::string> rest(args.begin() + 1, args.end());
-        auto with_device = [&](json req) {
-            if (!device.is_null()) req["device"] = device;
-            return req;
-        };
 
         if (cmd == "ping") {
             std::cout << "ds4linux daemon " << client.request({{"type", "Ping"}})["version"].get<std::string>()
@@ -468,14 +469,14 @@ int main(int argc, char** argv) {
                 throw UsageError("Use: lightbar <#RRGGBB | R G B>");
             }
             client.request(with_device({{"type", "SetLightbarColor"},
-                                        {"r", rgb[0]}, {"g", rgb[1]}, {"b", rgb[2]}}));
+                                        {"r", rgb[0]}, {"g", rgb[1]}, {"b", rgb[2]}}, device));
         } else if (cmd == "rumble") {
             if (rest.size() < 2 || rest.size() > 3) throw UsageError("Use: rumble <HEAVY> <LIGHT> [MS]");
             json req = {{"type", "SetRumble"},
                         {"heavy", parse_int(rest[0], 0, 255, "Heavy motor")},
                         {"light", parse_int(rest[1], 0, 255, "Light motor")}};
             if (rest.size() == 3) req["duration_ms"] = parse_int(rest[2], 0, 5000, "Duration");
-            client.request(with_device(req));
+            client.request(with_device(req, device));
         } else if (cmd == "test") {
             cmd_test(client, device);
         } else if (cmd == "profile") {

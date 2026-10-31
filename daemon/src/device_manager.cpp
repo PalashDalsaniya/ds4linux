@@ -543,11 +543,6 @@ static constexpr auto kBatteryPollInterval = std::chrono::seconds(5);
 // reports without IMU data, so the motion node exists but stays silent).
 static constexpr auto kMotionStallTimeout = std::chrono::milliseconds(20);
 
-// hid-playstation sets a default lightbar colour while probing the virtual
-// DS4; ignore LED output this soon after opening so it can't override the
-// profile colour already applied to the physical controller.
-static constexpr auto kProbeOutputGrace = std::chrono::seconds(2);
-
 // ── Translate loop ───────────────────────────────────────────────────────────
 
 void DeviceManager::translate_events() {
@@ -595,12 +590,11 @@ void DeviceManager::translate_events() {
         // ── Virtual output (rumble/LED from applications → physical) ────
         auto out = slot.virtual_dev->take_output();
         if (out.heavy >= 0) {
-            slot.game_heavy   = out.heavy;
-            slot.game_light   = out.light;
-            slot.rumble_dirty = true;
+            slot.game_heavy = out.heavy;
+            slot.game_light = out.light;
         }
         apply_rumble(slot, now);
-        if (out.led_changed && now - slot.opened_at >= kProbeOutputGrace) {
+        if (out.led_changed) {
             slot.physical->set_lightbar(out.led_r, out.led_g, out.led_b);
         }
 
@@ -661,20 +655,19 @@ void DeviceManager::emit(ControllerSlot& slot) {
     slot.virtual_dev->send_report(slot.output_state);
 }
 
-/// Forward the applications' rumble (scaled by the profile), unless a test
-/// rumble is playing.
+/// Drive the motors with the test rumble while it lasts, otherwise the
+/// applications' level scaled by the profile; write only on a change.
 void DeviceManager::apply_rumble(ControllerSlot& slot,
                                  std::chrono::steady_clock::time_point now) {
-    if (slot.test_rumble_active) {
-        if (now < slot.test_rumble_until) return;
-        slot.test_rumble_active = false;
-        slot.rumble_dirty = true;  // restore the applications' level
-    }
-    if (!slot.rumble_dirty) return;
-    slot.rumble_dirty = false;
     const double k = slot.profile.rumble_strength;
-    slot.physical->set_rumble(scale_rumble(slot.game_heavy, k),
-                              scale_rumble(slot.game_light, k));
+    const bool testing = now < slot.test_rumble_until;
+    const int heavy = testing ? slot.test_heavy : scale_rumble(slot.game_heavy, k);
+    const int light = testing ? slot.test_light : scale_rumble(slot.game_light, k);
+    if (heavy == slot.sent_heavy && light == slot.sent_light) return;
+    slot.physical->set_rumble(static_cast<std::uint8_t>(heavy),
+                              static_cast<std::uint8_t>(light));
+    slot.sent_heavy = heavy;
+    slot.sent_light = light;
 }
 
 // ── Profile ──────────────────────────────────────────────────────────────────
@@ -696,10 +689,7 @@ void DeviceManager::create_output(ControllerSlot& slot, OutputMode mode) {
     }
     if (!out) {
         try {
-            // A DS4 must not coexist with an old DS4 using the same MAC
-            if (slot.virtual_dev && slot.output_mode == OutputMode::DS4) slot.virtual_dev.reset();
             out = std::make_unique<VirtualDevice>(slot.virtual_mac);
-            slot.opened_at = std::chrono::steady_clock::now();  // probe-LED grace period
         } catch (const std::exception& ex) {
             if (!slot.virtual_dev) throw;
             std::cerr << "[ds4linux] " << ex.what() << " — keeping the current output\n";
@@ -721,17 +711,19 @@ bool DeviceManager::set_profile(const std::string& evdev_path, const Profile& p)
         create_output(slot, p.output_mode);  // keeps the old output on failure
     }
 
-    // Apply lightbar immediately
+    // Apply lightbar and mapping immediately; rumble scaling applies on the
+    // next pass
     slot.physical->set_lightbar(p.lightbar_color.r,
                                 p.lightbar_color.g,
                                 p.lightbar_color.b);
-    slot.rumble_dirty = true;  // re-apply rumble scaling
+    emit(slot);
     return true;
 }
 
-void DeviceManager::update_profile(const Profile& p) {
+void DeviceManager::reapply_profile(const std::string& name) {
+    if (!resolver_) return;
     for (auto& [path, slot] : slots_) {
-        if (slot.profile.name == p.name) set_profile(path, p);
+        if (slot.profile.name == name) set_profile(path, resolver_(slot.controller_key));
     }
 }
 
@@ -748,9 +740,11 @@ bool DeviceManager::test_rumble(const std::string& evdev_path, std::uint8_t heav
     auto it = slots_.find(evdev_path);
     if (it == slots_.end()) return false;
     auto& slot = it->second;
-    slot.physical->set_rumble(heavy, light);
-    slot.test_rumble_active = true;
-    slot.test_rumble_until  = std::chrono::steady_clock::now() + duration;
+    const auto now = std::chrono::steady_clock::now();
+    slot.test_heavy        = heavy;
+    slot.test_light        = light;
+    slot.test_rumble_until = now + duration;
+    apply_rumble(slot, now);
     return true;
 }
 

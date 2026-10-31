@@ -39,7 +39,7 @@ private:
     QPushButton*  colorBtn_ = nullptr;
     QStringList   profiles_;
     QJsonArray    devices_;
-    QString       layoutKey_;   // what the table rows were last built from
+    QString       layoutKey_;   // what the table rows were last built from (minus battery)
 };
 
 } // namespace ds4linux::gui

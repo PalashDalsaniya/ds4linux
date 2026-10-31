@@ -8,7 +8,9 @@
 #include <QObject>
 #include <QString>
 
+#include <cstdint>
 #include <functional>
+#include <vector>
 
 namespace ds4linux::gui {
 
@@ -41,7 +43,7 @@ private slots:
 
 private:
     QLocalSocket*      socket_ = nullptr;
-    QByteArray         recvBuf_;
+    std::vector<std::uint8_t> recvBuf_;
     int                nextId_ = 1;
     QHash<int, Reply>  pending_;
 };

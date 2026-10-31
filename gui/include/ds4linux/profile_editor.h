@@ -1,9 +1,13 @@
 #pragma once
 // ds4linux GUI — Profiles page: create, edit and delete profiles
 
+#include <ds4linux/profile.h>
+
 #include <QJsonObject>
 #include <QStringList>
 #include <QWidget>
+
+#include <functional>
 
 class QComboBox;
 class QDoubleSpinBox;
@@ -38,15 +42,16 @@ private:
     };
 
     void loadProfile(const QString& name);
-    void showProfile(const QJsonObject& p);
-    [[nodiscard]] QJsonObject collect() const;
+    void showProfile(const Profile& p);
+    [[nodiscard]] Profile collect() const;
+    void saveProfile(const Profile& p, const std::function<void()>& onSaved);
     void save();
     void createProfile(bool copyCurrent);
     void deleteProfile();
     void setDirty(bool dirty);
     DeadzoneControls makeDeadzone(bool stick);
-    void setDeadzone(const DeadzoneControls& c, const QJsonObject& dz) const;
-    [[nodiscard]] QJsonObject getDeadzone(const DeadzoneControls& c) const;
+    void setDeadzone(const DeadzoneControls& c, const DeadzoneParams& dz) const;
+    [[nodiscard]] DeadzoneParams getDeadzone(const DeadzoneControls& c) const;
 
     IpcClient*   ipc_       = nullptr;
     QListWidget* list_      = nullptr;

@@ -1,6 +1,7 @@
 // ds4linux GUI — Application entry point
 
 #include "ds4linux/constants.h"
+#include "ds4linux/gui_util.h"
 #include "ds4linux/main_window.h"
 
 #include <QApplication>
@@ -9,8 +10,7 @@
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName("DS4Linux");
-    app.setApplicationVersion(QString::fromLatin1(ds4linux::kVersion.data(),
-                                                  static_cast<qsizetype>(ds4linux::kVersion.size())));
+    app.setApplicationVersion(ds4linux::gui::toQString(ds4linux::kVersion));
     app.setOrganizationName("ds4linux");
     app.setDesktopFileName("ds4linux");
 
@@ -19,9 +19,7 @@ int main(int argc, char* argv[]) {
     parser.addHelpOption();
     parser.addVersionOption();
     const QCommandLineOption socketOpt(
-        "socket", "Daemon control socket.", "path",
-        QString::fromLatin1(ds4linux::kSocketPath.data(),
-                            static_cast<qsizetype>(ds4linux::kSocketPath.size())));
+        "socket", "Daemon control socket.", "path", ds4linux::gui::toQString(ds4linux::kSocketPath));
     parser.addOption(socketOpt);
     parser.process(app);
 

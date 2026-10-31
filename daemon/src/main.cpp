@@ -68,9 +68,17 @@ static bool parse_id_list(const std::string& list,
 }
 
 // ── Epoll set ────────────────────────────────────────────────────────────────
-// Rebuilt from scratch whenever the set of fds changes (controllers or
-// virtual outputs added / removed, IPC clients connecting).  Rebuilding is
-// rare and avoids stale registrations when fd numbers get reused.
+// Rebuilt from scratch whenever the device fds change (controllers or virtual
+// outputs added / removed), which is rare and avoids stale registrations when
+// fd numbers get reused.  IPC clients are added as they connect; closing a
+// client fd removes it from the set by itself.
+
+static void epoll_add(int epfd, int fd) {
+    struct epoll_event ev{};
+    ev.events  = EPOLLIN;
+    ev.data.fd = fd;
+    if (::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) perror("epoll_ctl ADD");
+}
 
 static int build_epoll(const DeviceManager& devmgr, const IpcServer* ipc) {
     int epfd = ::epoll_create1(EPOLL_CLOEXEC);
@@ -78,16 +86,10 @@ static int build_epoll(const DeviceManager& devmgr, const IpcServer* ipc) {
         perror("epoll_create1");
         return -1;
     }
-    auto add = [&](int fd) {
-        struct epoll_event ev{};
-        ev.events  = EPOLLIN;
-        ev.data.fd = fd;
-        if (::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) perror("epoll_ctl ADD");
-    };
-    for (int fd : devmgr.poll_fds()) add(fd);
+    for (int fd : devmgr.poll_fds()) epoll_add(epfd, fd);
     if (ipc) {
-        add(ipc->fd());
-        for (int fd : ipc->clients()) add(fd);
+        epoll_add(epfd, ipc->fd());
+        for (int fd : ipc->clients()) epoll_add(epfd, fd);
     }
     return epfd;
 }
@@ -164,7 +166,6 @@ int main(int argc, char** argv) {
                   << ") — ds4linux-ctl and the GUI will not work\n";
     }
     IpcHandler handler(devmgr, profiles);
-    bool ipc_clients_changed = false;
 
     // ── Main loop ────────────────────────────────────────────────────────────
     int epfd = -1;
@@ -172,34 +173,28 @@ int main(int argc, char** argv) {
     std::cout << "[ds4linux] Entering main loop (Ctrl+C to stop)\n";
 
     while (g_running) {
-        if (epfd < 0 || devmgr.take_fds_changed() || ipc_clients_changed) {
+        if (epfd < 0 || devmgr.take_fds_changed()) {
             if (epfd >= 0) ::close(epfd);
             epfd = build_epoll(devmgr, ipc.get());
             if (epfd < 0) return EXIT_FAILURE;
-            ipc_clients_changed = false;
         }
 
-        int nfds = ::epoll_wait(epfd, events, kEpollMaxEvents, 200 /*ms*/);
+        int nfds = ::epoll_wait(epfd, events, kEpollMaxEvents, kEpollTimeoutMs);
 
-        bool device_activity = false;
         for (int i = 0; i < nfds; ++i) {
             const int fd = events[i].data.fd;
             if (ipc && fd == ipc->fd()) {
-                while (ipc->accept_client() >= 0) ipc_clients_changed = true;
+                for (int client; (client = ipc->accept_client()) >= 0;) epoll_add(epfd, client);
             } else if (ipc && ipc->is_client(fd)) {
-                bool alive = ipc->read_client(fd, [&](int client, const std::string& msg) {
+                ipc->read_client(fd, [&](int client, const std::string& msg) {
                     ipc->send(client, handler.handle(msg));
                 });
-                if (!alive) ipc_clients_changed = true;
-            } else {
-                device_activity = true;
             }
         }
 
-        // Also run on timeouts so rumble deadlines expire while idle
-        if (device_activity || nfds == 0) {
-            devmgr.translate_events();
-        }
+        // Every wake-up, whatever caused it: reads are non-blocking, and
+        // rumble / force-feedback deadlines must expire even while idle
+        devmgr.translate_events();
     }
 
     std::cout << "[ds4linux] Daemon shutting down\n";

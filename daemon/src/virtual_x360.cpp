@@ -3,6 +3,7 @@
 #include "ds4linux/virtual_x360.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -22,6 +23,7 @@ static constexpr std::uint16_t kVidMicrosoft = 0x045E;
 static constexpr std::uint16_t kPidX360      = 0x028E;
 static constexpr std::uint16_t kX360Version  = 0x0110;
 static constexpr int           kMaxFfEffects = 16;
+static constexpr std::size_t   kReportEvents = 19;  // buttons + axes per report
 
 using Clock = std::chrono::steady_clock;
 
@@ -31,25 +33,19 @@ struct VirtualX360::Impl {
     struct Effect {
         std::uint16_t strong = 0, weak = 0;  // FF_RUMBLE magnitudes
         std::uint16_t length_ms = 0;         // 0 = until stopped
-        bool playing = false;
-        Clock::time_point stop_at{};
+        Clock::time_point stop_at{};         // playing while now < stop_at
     };
     std::unordered_map<int, Effect> effects;
     int last_heavy = 0, last_light = 0;
+
+    std::array<input_event, kReportEvents> sent{};  // last values written
+    bool sent_valid = false;
 
     ~Impl() {
         if (fd >= 0) {
             ::ioctl(fd, UI_DEV_DESTROY);
             ::close(fd);
         }
-    }
-
-    void emit(std::uint16_t type, std::uint16_t code, std::int32_t value) const {
-        struct input_event ev{};
-        ev.type  = type;
-        ev.code  = code;
-        ev.value = value;
-        [[maybe_unused]] auto _ = ::write(fd, &ev, sizeof(ev));
     }
 
     void handle_ff_upload(std::int32_t request_id) {
@@ -82,14 +78,16 @@ struct VirtualX360::Impl {
         auto it = effects.find(effect_id);
         if (it == effects.end()) return;
         auto& e = it->second;
-        e.playing = value > 0;
-        if (e.playing) {
+        if (value <= 0) {
+            e.stop_at = {};  // stopped
+        } else if (e.length_ms == 0) {
+            e.stop_at = Clock::time_point::max();  // until stopped
+        } else {
             // `value` is a repeat count; play `length` that many times
             // (capped at an hour so the deadline cannot overflow)
             const std::int64_t ms = std::min<std::int64_t>(
                 std::int64_t{e.length_ms} * value, 3'600'000);
-            e.stop_at = e.length_ms ? now + std::chrono::milliseconds(ms)
-                                    : Clock::time_point::max();
+            e.stop_at = now + std::chrono::milliseconds(ms);
         }
     }
 };
@@ -158,29 +156,44 @@ static std::int32_t stick_to_x360(std::uint8_t v) {
 }
 
 void VirtualX360::send_report(const DS4InputState& s) {
+    // (type, code, value) of every control, in a fixed order
+    const std::array<input_event, kReportEvents> now_state = {{
+        {{}, EV_KEY, BTN_A,      s.cross},
+        {{}, EV_KEY, BTN_B,      s.circle},
+        {{}, EV_KEY, BTN_X,      s.square},
+        {{}, EV_KEY, BTN_Y,      s.triangle},
+        {{}, EV_KEY, BTN_TL,     s.l1},
+        {{}, EV_KEY, BTN_TR,     s.r1},
+        {{}, EV_KEY, BTN_SELECT, s.share},
+        {{}, EV_KEY, BTN_START,  s.options},
+        {{}, EV_KEY, BTN_MODE,   s.ps},
+        {{}, EV_KEY, BTN_THUMBL, s.l3},
+        {{}, EV_KEY, BTN_THUMBR, s.r3},
+        {{}, EV_ABS, ABS_X,  stick_to_x360(s.lx)},
+        {{}, EV_ABS, ABS_Y,  stick_to_x360(s.ly)},
+        {{}, EV_ABS, ABS_RX, stick_to_x360(s.rx)},
+        {{}, EV_ABS, ABS_RY, stick_to_x360(s.ry)},
+        {{}, EV_ABS, ABS_Z,  s.l2},
+        {{}, EV_ABS, ABS_RZ, s.r2},
+        {{}, EV_ABS, ABS_HAT0X, s.hat_x},
+        {{}, EV_ABS, ABS_HAT0Y, s.hat_y},
+    }};
+
+    // Frames arrive at the controller's report rate, mostly carrying only
+    // motion data the Xbox 360 pad lacks: send just the changed controls,
+    // in one write, and nothing at all if none changed.
     auto& d = *impl_;
-    d.emit(EV_KEY, BTN_A,      s.cross);
-    d.emit(EV_KEY, BTN_B,      s.circle);
-    d.emit(EV_KEY, BTN_X,      s.square);
-    d.emit(EV_KEY, BTN_Y,      s.triangle);
-    d.emit(EV_KEY, BTN_TL,     s.l1);
-    d.emit(EV_KEY, BTN_TR,     s.r1);
-    d.emit(EV_KEY, BTN_SELECT, s.share);
-    d.emit(EV_KEY, BTN_START,  s.options);
-    d.emit(EV_KEY, BTN_MODE,   s.ps);
-    d.emit(EV_KEY, BTN_THUMBL, s.l3);
-    d.emit(EV_KEY, BTN_THUMBR, s.r3);
-
-    d.emit(EV_ABS, ABS_X,  stick_to_x360(s.lx));
-    d.emit(EV_ABS, ABS_Y,  stick_to_x360(s.ly));
-    d.emit(EV_ABS, ABS_RX, stick_to_x360(s.rx));
-    d.emit(EV_ABS, ABS_RY, stick_to_x360(s.ry));
-    d.emit(EV_ABS, ABS_Z,  s.l2);
-    d.emit(EV_ABS, ABS_RZ, s.r2);
-    d.emit(EV_ABS, ABS_HAT0X, s.hat_x);
-    d.emit(EV_ABS, ABS_HAT0Y, s.hat_y);
-
-    d.emit(EV_SYN, SYN_REPORT, 0);
+    std::array<input_event, kReportEvents + 1> batch{};
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < kReportEvents; ++i) {
+        if (d.sent_valid && now_state[i].value == d.sent[i].value) continue;
+        batch[n++] = now_state[i];
+    }
+    if (n == 0) return;
+    batch[n++] = input_event{{}, EV_SYN, SYN_REPORT, 0};
+    [[maybe_unused]] auto _ = ::write(d.fd, batch.data(), n * sizeof(input_event));
+    d.sent = now_state;
+    d.sent_valid = true;
 }
 
 RumbleOutput VirtualX360::take_output() {
@@ -201,8 +214,7 @@ RumbleOutput VirtualX360::take_output() {
     // Combined level of all playing effects; expire finished ones
     int heavy = 0, light = 0;
     for (auto& [id, e] : d.effects) {
-        if (e.playing && now >= e.stop_at) e.playing = false;
-        if (!e.playing) continue;
+        if (now >= e.stop_at) continue;
         heavy = std::max(heavy, e.strong >> 8);
         light = std::max(light, e.weak >> 8);
     }

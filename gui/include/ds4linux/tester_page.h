@@ -52,7 +52,6 @@ private:
     QLabel*         hint_    = nullptr;
     QTimer*         timer_   = nullptr;
     bool            waiting_ = false;
-    QString         devicesKey_;   // what the device chooser was built from
 };
 
 } // namespace ds4linux::gui

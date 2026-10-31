@@ -99,9 +99,6 @@ public:
     /// Set rumble motors via hidraw.
     bool set_rumble(std::uint8_t heavy, std::uint8_t light);
 
-    /// Read battery percentage (0–100, or -1 on failure).
-    [[nodiscard]] int battery_percent() const;
-
     /// Read this controller's battery level and charging state from sysfs.
     [[nodiscard]] BatteryInfo battery() const;
 

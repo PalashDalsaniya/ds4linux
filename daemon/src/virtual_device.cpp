@@ -187,6 +187,7 @@ struct VirtualDevice::Impl {
     std::uint8_t counter = 0;       // 6-bit frame counter
     std::uint8_t touch_counter = 0; // touch packet timestamp
     std::array<std::uint8_t, 6> mac{};
+    std::chrono::steady_clock::time_point created_at = std::chrono::steady_clock::now();
 
     // Permanent background thread variables.  The I/O thread is the only
     // reader of the UHID fd; it hands rumble/LED output to the main loop
@@ -302,6 +303,11 @@ VirtualDevice& VirtualDevice::operator=(VirtualDevice&&) noexcept = default;
 
 int VirtualDevice::output_fd() const noexcept { return impl_->output_event_fd; }
 
+// hid-playstation sets a default lightbar colour while probing the virtual
+// DS4; drop LED output this soon after creation so it can't override the
+// profile colour already applied to the physical controller.
+static constexpr auto kProbeLedGrace = std::chrono::seconds(2);
+
 RumbleOutput VirtualDevice::take_output() {
     std::uint64_t count = 0;
     [[maybe_unused]] auto _ = ::read(impl_->output_event_fd, &count, sizeof(count));
@@ -309,6 +315,9 @@ RumbleOutput VirtualDevice::take_output() {
     std::lock_guard lock(impl_->pending_mutex);
     RumbleOutput out = impl_->pending;
     impl_->pending = {};
+    if (std::chrono::steady_clock::now() - impl_->created_at < kProbeLedGrace) {
+        out.led_changed = false;
+    }
     return out;
 }
 

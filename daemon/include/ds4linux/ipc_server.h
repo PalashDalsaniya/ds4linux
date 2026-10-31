@@ -36,13 +36,10 @@ public:
     /// (closed by the peer, or dropped for sending a malformed frame).
     bool read_client(int client_fd, const IpcMessageHandler& handler);
 
-    /// Send a JSON response/event to a connected client.  A client that
-    /// cannot take the whole frame within a short timeout is disconnected
-    /// (a partial frame would corrupt its stream).  Returns false then.
+    /// Send a JSON response to a connected client.  Never blocks: a client
+    /// whose socket buffer is full (it stopped reading) is disconnected, as
+    /// a partial frame would corrupt its stream.  Returns false then.
     bool send(int client_fd, const std::string& json_payload);
-
-    /// Broadcast a JSON event to all connected clients.
-    void broadcast(const std::string& json_payload);
 
     /// Disconnect a client.
     void disconnect(int client_fd);

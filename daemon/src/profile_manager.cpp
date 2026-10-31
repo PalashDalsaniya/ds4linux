@@ -17,6 +17,10 @@ using json = nlohmann::json;
 
 namespace ds4linux::daemon {
 
+// Clients reach the daemon over a world-writable socket; bound how many
+// files they can make it (root) write.
+static constexpr std::size_t kMaxProfiles = 256;
+
 static std::string read_file(const fs::path& path) {
     std::ifstream ifs(path);
     if (!ifs) throw std::runtime_error("Cannot read " + path.string());
@@ -44,8 +48,8 @@ static void write_file_atomic(const fs::path& path, const std::string& content) 
 }
 
 ProfileManager::ProfileManager(std::string state_dir)
-    : state_dir_(std::move(state_dir)),
-      profiles_dir_((fs::path(state_dir_) / kProfilesDirName).string())
+    : profiles_dir_((fs::path(state_dir) / kProfilesDirName).string()),
+      assignments_path_((fs::path(state_dir) / kAssignmentsFile).string())
 {
     std::error_code ec;
     fs::create_directories(profiles_dir_, ec);
@@ -75,7 +79,12 @@ Profile ProfileManager::load(const std::string& name) const {
 }
 
 void ProfileManager::save(const Profile& p) const {
-    write_file_atomic(path_for(p.name), profile_to_json(p));
+    const auto path = path_for(p.name);
+    if (!fs::exists(path) && list().size() >= kMaxProfiles) {
+        throw std::runtime_error("Too many profiles (limit " +
+                                 std::to_string(kMaxProfiles) + ")");
+    }
+    write_file_atomic(path, profile_to_json(p));
 }
 
 std::vector<std::string> ProfileManager::list() const {
@@ -98,12 +107,9 @@ void ProfileManager::remove(const std::string& name) {
     if (!fs::remove(path_for(name), ec)) {
         throw std::runtime_error("Profile not found: " + name);
     }
-    bool changed = false;
-    for (auto it = assignments_.begin(); it != assignments_.end();) {
-        if (it->second == name) { it = assignments_.erase(it); changed = true; }
-        else ++it;
+    if (std::erase_if(assignments_, [&](const auto& a) { return a.second == name; })) {
+        save_assignments();
     }
-    if (changed) save_assignments();
 }
 
 std::string ProfileManager::assigned(const std::string& controller_key) const {
@@ -128,17 +134,17 @@ Profile ProfileManager::profile_for(const std::string& controller_key) const {
 }
 
 void ProfileManager::load_assignments() {
-    const auto path = fs::path(state_dir_) / kAssignmentsFile;
-    if (!fs::exists(path)) return;
+    if (!fs::exists(assignments_path_)) return;
     try {
-        auto j = json::parse(read_file(path));
+        auto j = json::parse(read_file(assignments_path_));
         for (const auto& [key, val] : j.items()) {
             if (val.is_string() && is_valid_profile_name(val.get<std::string>())) {
                 assignments_[key] = val.get<std::string>();
             }
         }
     } catch (const std::exception& ex) {
-        std::cerr << "[ds4linux] Ignoring unreadable " << path << ": " << ex.what() << "\n";
+        std::cerr << "[ds4linux] Ignoring unreadable " << assignments_path_ << ": "
+                  << ex.what() << "\n";
     }
 }
 
@@ -146,7 +152,7 @@ void ProfileManager::save_assignments() const {
     json j = json::object();
     for (const auto& [key, name] : assignments_) j[key] = name;
     try {
-        write_file_atomic(fs::path(state_dir_) / kAssignmentsFile, j.dump(4));
+        write_file_atomic(assignments_path_, j.dump(4));
     } catch (const std::exception& ex) {
         std::cerr << "[ds4linux] " << ex.what() << "\n";
     }
