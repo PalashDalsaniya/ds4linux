@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace ds4linux::daemon {
 
@@ -27,21 +28,30 @@ public:
     /// The listening socket fd (for epoll registration).
     [[nodiscard]] int fd() const noexcept;
 
-    /// Accept a new client connection.  Returns the client fd.
+    /// Accept a new client connection.  Returns the client fd, or -1.
     [[nodiscard]] int accept_client();
 
     /// Read and frame incoming data on `client_fd`, calling `handler` for each
-    /// complete message.  Returns false if the client disconnected.
+    /// complete message.  Returns false if the client was disconnected
+    /// (closed by the peer, or dropped for sending a malformed frame).
     bool read_client(int client_fd, const IpcMessageHandler& handler);
 
-    /// Send a JSON response/event to a connected client.
-    void send(int client_fd, const std::string& json_payload);
+    /// Send a JSON response/event to a connected client.  A client that
+    /// cannot take the whole frame within a short timeout is disconnected
+    /// (a partial frame would corrupt its stream).  Returns false then.
+    bool send(int client_fd, const std::string& json_payload);
 
     /// Broadcast a JSON event to all connected clients.
     void broadcast(const std::string& json_payload);
 
     /// Disconnect a client.
     void disconnect(int client_fd);
+
+    /// Whether `fd` is a connected client.
+    [[nodiscard]] bool is_client(int fd) const;
+
+    /// Connected client fds (for epoll registration).
+    [[nodiscard]] const std::vector<int>& clients() const noexcept;
 
 private:
     struct Impl;

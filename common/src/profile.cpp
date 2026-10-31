@@ -1,32 +1,68 @@
 // ds4linux — Profile serialisation (JSON via nlohmann/json)
 
 #include "ds4linux/profile.h"
-#include "ds4linux/constants.h"
 
 #include <nlohmann/json.hpp>
 
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
-namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace ds4linux {
 
+// ── Button names ─────────────────────────────────────────────────────────────
+
+static constexpr std::array<std::string_view, kDS4ButtonCount + 1> kButtonNames = {
+    "cross", "circle", "square", "triangle",
+    "l1", "r1", "l2", "r2",
+    "share", "options", "l3", "r3", "ps", "touchpad",
+    "dpad_up", "dpad_down", "dpad_left", "dpad_right",
+    "none",
+};
+
+std::string_view to_string(DS4Button b) noexcept {
+    auto i = static_cast<std::size_t>(b);
+    return i < kButtonNames.size() ? kButtonNames[i] : "none";
+}
+
+std::optional<DS4Button> ds4_button_from_string(std::string_view s) noexcept {
+    for (std::size_t i = 0; i < kButtonNames.size(); ++i) {
+        if (kButtonNames[i] == s) return static_cast<DS4Button>(i);
+    }
+    return std::nullopt;
+}
+
+bool is_valid_profile_name(std::string_view name) noexcept {
+    if (name.empty() || name.size() > 64) return false;
+    if (name.front() == '.' || name.front() == ' ') return false;
+    return std::all_of(name.begin(), name.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == ' ' || c == '_' || c == '.' || c == '-';
+    });
+}
+
 // ── JSON helpers ─────────────────────────────────────────────────────────────
+
+/// Read a number from `j[key]`, falling back to `def` for missing, non-numeric
+/// or non-finite values, and clamping into [lo, hi].
+static double get_number(const json& j, const char* key, double def, double lo, double hi) {
+    if (!j.is_object() || !j.contains(key) || !j[key].is_number()) return def;
+    double v = j[key].get<double>();
+    if (!std::isfinite(v)) return def;
+    return std::clamp(v, lo, hi);
+}
 
 static json lightbar_to_json(const LightbarColor& c) {
     return { {"r", c.r}, {"g", c.g}, {"b", c.b} };
 }
 
 static LightbarColor lightbar_from_json(const json& j) {
-    return {
-        j.value("r", std::uint8_t{0}),
-        j.value("g", std::uint8_t{0}),
-        j.value("b", std::uint8_t{0xFF}),
+    auto channel = [&](const char* k, double def) {
+        return static_cast<std::uint8_t>(std::lround(get_number(j, k, def, 0, 255)));
     };
+    return { channel("r", 0), channel("g", 0), channel("b", 255) };
 }
 
 static json deadzone_to_json(const DeadzoneParams& dz) {
@@ -37,42 +73,34 @@ static json deadzone_to_json(const DeadzoneParams& dz) {
     };
 }
 
-static DeadzoneParams deadzone_from_json(const json& j) {
+static DeadzoneParams deadzone_from_json(const json& j, const DeadzoneParams& def) {
     DeadzoneParams dz;
-    dz.type  = static_cast<DeadzoneType>(j.value("type", 1));
-    dz.inner = j.value("inner", 0.05);
-    dz.outer = j.value("outer", 1.0);
+    const double type = get_number(j, "type", static_cast<double>(def.type), 0, 2);
+    dz.type  = static_cast<DeadzoneType>(static_cast<int>(type));
+    dz.inner = get_number(j, "inner", def.inner, 0.0, 0.95);
+    dz.outer = get_number(j, "outer", def.outer, 0.05, 1.0);
+    if (dz.outer <= dz.inner) dz.outer = std::min(1.0, dz.inner + 0.05);
     return dz;
 }
 
 static json button_map_to_json(const ButtonMap& m) {
     json j = json::object();
-    for (auto& [k, v] : m) {
-        j[std::to_string(k)] = v;
+    for (const auto& [from, to] : m) {
+        j[std::string(to_string(from))] = std::string(to_string(to));
     }
     return j;
 }
 
 static ButtonMap button_map_from_json(const json& j) {
+    // Unknown names (including numeric keys from older profile versions)
+    // are ignored rather than rejected.
     ButtonMap m;
-    for (auto& [key, val] : j.items()) {
-        m[static_cast<std::uint16_t>(std::stoul(key))] = val.get<std::uint16_t>();
-    }
-    return m;
-}
-
-static json axis_map_to_json(const AxisMap& m) {
-    json j = json::object();
-    for (auto& [k, v] : m) {
-        j[std::to_string(k)] = v;
-    }
-    return j;
-}
-
-static AxisMap axis_map_from_json(const json& j) {
-    AxisMap m;
-    for (auto& [key, val] : j.items()) {
-        m[static_cast<std::uint16_t>(std::stoul(key))] = val.get<std::uint16_t>();
+    if (!j.is_object()) return m;
+    for (const auto& [key, val] : j.items()) {
+        if (!val.is_string()) continue;
+        auto from = ds4_button_from_string(key);
+        auto to   = ds4_button_from_string(val.get<std::string>());
+        if (from && to && *from != DS4Button::None && *from != *to) m[*from] = *to;
     }
     return m;
 }
@@ -89,46 +117,38 @@ std::string profile_to_json(const Profile& p) {
     j["right_stick_dz"]     = deadzone_to_json(p.right_stick_dz);
     j["left_trigger_dz"]    = deadzone_to_json(p.left_trigger_dz);
     j["right_trigger_dz"]   = deadzone_to_json(p.right_trigger_dz);
-    j["touchpad_as_mouse"]  = p.touchpad_as_mouse;
-    j["touchpad_sensitivity"] = p.touchpad_sensitivity;
     j["button_map"]         = button_map_to_json(p.button_map);
-    j["axis_map"]           = axis_map_to_json(p.axis_map);
     return j.dump(4);
 }
 
 Profile profile_from_json(const std::string& raw) {
-    auto j = json::parse(raw);
+    json j;
+    try {
+        j = json::parse(raw);
+    } catch (const json::exception& ex) {
+        throw std::runtime_error(std::string("Invalid profile JSON: ") + ex.what());
+    }
+    if (!j.is_object()) throw std::runtime_error("Invalid profile JSON: not an object");
+
+    const Profile def;
     Profile p;
-    p.name                = j.value("name", std::string{"Default"});
-    p.output_mode         = static_cast<OutputMode>(j.value("output_mode", 0));
+    if (j.contains("name") && j["name"].is_string()) p.name = j["name"].get<std::string>();
+    p.output_mode = static_cast<OutputMode>(
+        static_cast<int>(get_number(j, "output_mode", 0, 0, 1)));
     if (j.contains("lightbar_color"))
         p.lightbar_color  = lightbar_from_json(j["lightbar_color"]);
-    p.rumble_strength     = j.value("rumble_strength", 1.0);
+    p.rumble_strength     = get_number(j, "rumble_strength", 1.0, 0.0, 1.0);
     if (j.contains("left_stick_dz"))
-        p.left_stick_dz   = deadzone_from_json(j["left_stick_dz"]);
+        p.left_stick_dz   = deadzone_from_json(j["left_stick_dz"], def.left_stick_dz);
     if (j.contains("right_stick_dz"))
-        p.right_stick_dz  = deadzone_from_json(j["right_stick_dz"]);
+        p.right_stick_dz  = deadzone_from_json(j["right_stick_dz"], def.right_stick_dz);
     if (j.contains("left_trigger_dz"))
-        p.left_trigger_dz = deadzone_from_json(j["left_trigger_dz"]);
+        p.left_trigger_dz = deadzone_from_json(j["left_trigger_dz"], def.left_trigger_dz);
     if (j.contains("right_trigger_dz"))
-        p.right_trigger_dz= deadzone_from_json(j["right_trigger_dz"]);
-    p.touchpad_as_mouse   = j.value("touchpad_as_mouse", false);
-    p.touchpad_sensitivity= j.value("touchpad_sensitivity", 1.0);
+        p.right_trigger_dz= deadzone_from_json(j["right_trigger_dz"], def.right_trigger_dz);
     if (j.contains("button_map"))
         p.button_map      = button_map_from_json(j["button_map"]);
-    if (j.contains("axis_map"))
-        p.axis_map        = axis_map_from_json(j["axis_map"]);
     return p;
-}
-
-std::string config_dir() {
-    const char* xdg = std::getenv("XDG_CONFIG_HOME");
-    fs::path base = xdg ? fs::path(xdg) : fs::path(std::getenv("HOME")) / ".config";
-    return (base / kConfigDirName).string();
-}
-
-std::string profiles_dir() {
-    return (fs::path(config_dir()) / kProfilesDirName).string();
 }
 
 } // namespace ds4linux

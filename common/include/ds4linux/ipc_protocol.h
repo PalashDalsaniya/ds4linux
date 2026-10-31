@@ -27,12 +27,16 @@ enum class MessageType : std::uint8_t {
     SaveProfile           = 0x21,
     ListProfiles          = 0x22,
     SetActiveProfile      = 0x23,
+    DeleteProfile         = 0x24,
+    GetInputState         = 0x30,
 
     // Responses / Events (Daemon → GUI)
     Pong                  = 0x81,
     DeviceList            = 0x82,
     DeviceStatus          = 0x83,
     ProfileList           = 0xA2,
+    Profile               = 0xA3,
+    InputState            = 0xB0,
     Ok                    = 0xF0,
     Error                 = 0xFF,
 

@@ -69,6 +69,10 @@ const char* message_type_to_string(MessageType t) noexcept {
         CASE_STR(SaveProfile);
         CASE_STR(ListProfiles);
         CASE_STR(SetActiveProfile);
+        CASE_STR(DeleteProfile);
+        CASE_STR(GetInputState);
+        CASE_STR(Profile);
+        CASE_STR(InputState);
         CASE_STR(Pong);
         CASE_STR(DeviceList);
         CASE_STR(DeviceStatus);
@@ -96,6 +100,10 @@ std::optional<MessageType> string_to_message_type(const std::string& s) noexcept
     CHECK(SaveProfile);
     CHECK(ListProfiles);
     CHECK(SetActiveProfile);
+    CHECK(DeleteProfile);
+    CHECK(GetInputState);
+    CHECK(Profile);
+    CHECK(InputState);
     CHECK(Pong);
     CHECK(DeviceList);
     CHECK(DeviceStatus);

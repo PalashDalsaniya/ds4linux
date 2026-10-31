@@ -1,24 +1,29 @@
 // ds4linux daemon — main entry point
 //
-// Headless daemon: grabs DualSense/DS4 controllers, creates virtual DS4
-// devices, and forwards input + rumble. Hides the real controller from
-// other applications (including Steam).
+// Headless daemon: grabs DualSense/DS4 controllers, creates virtual DS4 or
+// Xbox 360 devices, and forwards input + rumble. Hides the real controller
+// from other applications (including Steam).  The CLI (ds4linux-ctl) and GUI
+// control it over a Unix socket.
 //
 // Runs as: systemd service (root) → /usr/bin/ds4linux-daemon
 
 #include "ds4linux/constants.h"
 #include "ds4linux/device_manager.h"
+#include "ds4linux/ipc_handler.h"
+#include "ds4linux/ipc_server.h"
+#include "ds4linux/profile_manager.h"
 
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <sys/epoll.h>
 #include <unistd.h>
-#include <unordered_map>
+#include <vector>
 
 using namespace ds4linux;
 using namespace ds4linux::daemon;
@@ -30,17 +35,6 @@ static void signal_handler(int /*sig*/) {
     g_running = 0;
 }
 
-// ── Epoll helpers ────────────────────────────────────────────────────────────
-
-static void epoll_add(int epfd, int fd, uint32_t events = EPOLLIN) {
-    struct epoll_event ev{};
-    ev.events  = events;
-    ev.data.fd = fd;
-    if (::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
-        perror("epoll_ctl ADD");
-    }
-}
-
 // ── Command line ─────────────────────────────────────────────────────────────
 
 static void print_usage() {
@@ -50,6 +44,8 @@ static void print_usage() {
         "Options:\n"
         "  --generic             Also emulate a DS4 for non-Sony gamepads\n"
         "  --generic=VID:PID,..  Only for these gamepads (hex IDs, e.g. 046d:c21f)\n"
+        "  --socket=PATH         Control socket (default " << kSocketPath << ")\n"
+        "  --state-dir=DIR       Profiles and settings (default " << kStateDir << ")\n"
         "  --version             Print version and exit\n"
         "  -h, --help            Show this help\n";
 }
@@ -71,10 +67,37 @@ static bool parse_id_list(const std::string& list,
     return !out.empty();
 }
 
+// ── Epoll set ────────────────────────────────────────────────────────────────
+// Rebuilt from scratch whenever the set of fds changes (controllers or
+// virtual outputs added / removed, IPC clients connecting).  Rebuilding is
+// rare and avoids stale registrations when fd numbers get reused.
+
+static int build_epoll(const DeviceManager& devmgr, const IpcServer* ipc) {
+    int epfd = ::epoll_create1(EPOLL_CLOEXEC);
+    if (epfd < 0) {
+        perror("epoll_create1");
+        return -1;
+    }
+    auto add = [&](int fd) {
+        struct epoll_event ev{};
+        ev.events  = EPOLLIN;
+        ev.data.fd = fd;
+        if (::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) perror("epoll_ctl ADD");
+    };
+    for (int fd : devmgr.poll_fds()) add(fd);
+    if (ipc) {
+        add(ipc->fd());
+        for (int fd : ipc->clients()) add(fd);
+    }
+    return epfd;
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
     DeviceManagerOptions options;
+    std::string socket_path(kSocketPath);
+    std::string state_dir(kStateDir);
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -92,6 +115,10 @@ int main(int argc, char** argv) {
                           << " (expected VID:PID[,VID:PID...] in hex)\n";
                 return EXIT_FAILURE;
             }
+        } else if (arg.rfind("--socket=", 0) == 0 && arg.size() > 9) {
+            socket_path = arg.substr(9);
+        } else if (arg.rfind("--state-dir=", 0) == 0 && arg.size() > 12) {
+            state_dir = arg.substr(12);
         } else {
             std::cerr << "[ds4linux] Unknown option: " << arg << "\n";
             print_usage();
@@ -114,58 +141,68 @@ int main(int argc, char** argv) {
     ::sigaction(SIGINT,  &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
 
-    // ── Device manager ───────────────────────────────────────────────────────
+    // ── Profiles + device manager ────────────────────────────────────────────
+    ProfileManager profiles(state_dir);
     DeviceManager devmgr(options);
+    devmgr.set_profile_resolver([&](const std::string& key) {
+        return profiles.profile_for(key);
+    });
     devmgr.scan();
-
-    // ── epoll setup ──────────────────────────────────────────────────────────
-    int epfd = ::epoll_create1(EPOLL_CLOEXEC);
-    if (epfd < 0) {
-        perror("epoll_create1");
-        return EXIT_FAILURE;
-    }
-
-    // Register all physical + virtual device fds
-    std::unordered_map<int, std::string> registered_fds;
-
-    auto sync_epoll = [&]() {
-        for (auto& [path, slot] : devmgr.slots()) {
-            auto reg = [&](int fd, const char* label) {
-                if (fd >= 0 && !registered_fds.count(fd)) {
-                    epoll_add(epfd, fd);
-                    registered_fds[fd] = path;
-                    std::cout << "[ds4linux] epoll: " << label
-                              << " fd=" << fd << " (" << path << ")\n";
-                }
-            };
-            if (slot.physical)          reg(slot.physical->fd(),          "gamepad");
-            if (slot.physical_touchpad) reg(slot.physical_touchpad->fd(), "touchpad");
-            if (slot.physical_motion)   reg(slot.physical_motion->fd(),   "motion");
-            // Rumble/LED output from applications (collected by the UHID thread)
-            if (slot.virtual_dev)       reg(slot.virtual_dev->output_fd(), "uhid-output");
-        }
-    };
-
-    sync_epoll();
 
     if (devmgr.slots().empty()) {
         std::cerr << "[ds4linux] No controllers found. "
                      "Make sure the daemon is running as root.\n";
     }
 
+    // ── IPC (CLI / GUI control socket) ───────────────────────────────────────
+    std::unique_ptr<IpcServer> ipc;
+    try {
+        ipc = std::make_unique<IpcServer>(socket_path);
+        std::cout << "[ds4linux] Control socket: " << socket_path << "\n";
+    } catch (const std::exception& ex) {
+        std::cerr << "[ds4linux] Control socket unavailable (" << ex.what()
+                  << ") — ds4linux-ctl and the GUI will not work\n";
+    }
+    IpcHandler handler(devmgr, profiles);
+    bool ipc_clients_changed = false;
+
     // ── Main loop ────────────────────────────────────────────────────────────
+    int epfd = -1;
     struct epoll_event events[kEpollMaxEvents];
     std::cout << "[ds4linux] Entering main loop (Ctrl+C to stop)\n";
 
     while (g_running) {
+        if (epfd < 0 || devmgr.take_fds_changed() || ipc_clients_changed) {
+            if (epfd >= 0) ::close(epfd);
+            epfd = build_epoll(devmgr, ipc.get());
+            if (epfd < 0) return EXIT_FAILURE;
+            ipc_clients_changed = false;
+        }
+
         int nfds = ::epoll_wait(epfd, events, kEpollMaxEvents, 200 /*ms*/);
 
-        if (nfds > 0) {
+        bool device_activity = false;
+        for (int i = 0; i < nfds; ++i) {
+            const int fd = events[i].data.fd;
+            if (ipc && fd == ipc->fd()) {
+                while (ipc->accept_client() >= 0) ipc_clients_changed = true;
+            } else if (ipc && ipc->is_client(fd)) {
+                bool alive = ipc->read_client(fd, [&](int client, const std::string& msg) {
+                    ipc->send(client, handler.handle(msg));
+                });
+                if (!alive) ipc_clients_changed = true;
+            } else {
+                device_activity = true;
+            }
+        }
+
+        // Also run on timeouts so rumble deadlines expire while idle
+        if (device_activity || nfds == 0) {
             devmgr.translate_events();
         }
     }
 
     std::cout << "[ds4linux] Daemon shutting down\n";
-    ::close(epfd);
+    if (epfd >= 0) ::close(epfd);
     return EXIT_SUCCESS;
 }
