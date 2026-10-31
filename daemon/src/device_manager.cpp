@@ -641,6 +641,8 @@ void DeviceManager::translate_events() {
 
         const bool motion_live = slot.physical_motion &&
                                  now - slot.last_motion_sync < kMotionStallTimeout;
+        // A stalled sensor clock would freeze the report timestamp
+        if (!motion_live) slot.ds4_state.has_sensor_time = false;
         if (frame_end || (input_sync && !motion_live)) {
             slot.virtual_dev->send_report(slot.ds4_state);
         }
