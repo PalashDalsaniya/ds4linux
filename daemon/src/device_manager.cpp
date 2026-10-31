@@ -680,20 +680,35 @@ void DeviceManager::apply_rumble(ControllerSlot& slot,
 // ── Profile ──────────────────────────────────────────────────────────────────
 
 void DeviceManager::create_output(ControllerSlot& slot, OutputMode mode) {
-    slot.virtual_dev.reset();  // destroy the old output before creating the new one
-    fds_changed_ = true;
+    // Build the new output before dropping the old one, so a failed switch
+    // leaves the controller working.  Throws if no output can be created.
+    std::unique_ptr<VirtualOutput> out;
+    OutputMode created = mode;
     if (mode == OutputMode::X360) {
         try {
-            slot.virtual_dev = std::make_unique<VirtualX360>();
-            slot.output_mode = OutputMode::X360;
-            return;
+            out = std::make_unique<VirtualX360>();
         } catch (const std::exception& ex) {
-            std::cerr << "[ds4linux] " << ex.what() << " — falling back to DS4 output\n";
+            std::cerr << "[ds4linux] " << ex.what() << "\n";
+            if (slot.virtual_dev) return;  // keep the current output
+            std::cerr << "[ds4linux] Falling back to DS4 output\n";
+            created = OutputMode::DS4;
         }
     }
-    slot.virtual_dev = std::make_unique<VirtualDevice>(slot.virtual_mac);
-    slot.output_mode = OutputMode::DS4;
-    slot.opened_at   = std::chrono::steady_clock::now();  // probe-LED grace period
+    if (!out) {
+        try {
+            // A DS4 must not coexist with an old DS4 using the same MAC
+            if (slot.virtual_dev && slot.output_mode == OutputMode::DS4) slot.virtual_dev.reset();
+            out = std::make_unique<VirtualDevice>(slot.virtual_mac);
+            slot.opened_at = std::chrono::steady_clock::now();  // probe-LED grace period
+        } catch (const std::exception& ex) {
+            if (!slot.virtual_dev) throw;
+            std::cerr << "[ds4linux] " << ex.what() << " — keeping the current output\n";
+            return;
+        }
+    }
+    slot.virtual_dev = std::move(out);
+    slot.output_mode = created;
+    fds_changed_ = true;
 }
 
 bool DeviceManager::set_profile(const std::string& evdev_path, const Profile& p) {
@@ -703,12 +718,7 @@ bool DeviceManager::set_profile(const std::string& evdev_path, const Profile& p)
     slot.profile = p;
 
     if (p.output_mode != slot.output_mode) {
-        try {
-            create_output(slot, p.output_mode);
-        } catch (const std::exception& ex) {
-            std::cerr << "[ds4linux] Could not switch output for " << evdev_path
-                      << ": " << ex.what() << "\n";
-        }
+        create_output(slot, p.output_mode);  // keeps the old output on failure
     }
 
     // Apply lightbar immediately
@@ -814,6 +824,10 @@ bool DeviceManager::open_slot(const std::string& evdev_path,
         slot.physical_id = physical_id;
         slot.physical    = std::make_unique<InputDevice>(evdev_path, /*grab=*/true);
         slot.gamepad_map = build_gamepad_map(*slot.physical);
+        slot.physical->replay_current_state(
+            [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
+                apply_gamepad_event(slot, type, code, value);
+            });
 
         const std::string uniq = slot.physical->uniq();
         slot.controller_key = !uniq.empty()        ? uniq
@@ -832,6 +846,8 @@ bool DeviceManager::open_slot(const std::string& evdev_path,
         slot.physical->set_lightbar(slot.profile.lightbar_color.r,
                                     slot.profile.lightbar_color.g,
                                     slot.profile.lightbar_color.b);
+
+        emit(slot);  // publish the seeded state (held buttons, deflected sticks)
 
         slots_.emplace(evdev_path, std::move(slot));
         fds_changed_ = true;

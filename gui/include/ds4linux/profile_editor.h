@@ -1,42 +1,71 @@
 #pragma once
-// ds4linux GUI — Profile editor panel
+// ds4linux GUI — Profiles page: create, edit and delete profiles
 
+#include <QJsonObject>
+#include <QStringList>
 #include <QWidget>
-#include <QComboBox>
-#include <QLineEdit>
-#include <QPushButton>
-#include <QCheckBox>
-#include <QDoubleSpinBox>
+
+class QComboBox;
+class QDoubleSpinBox;
+class QLabel;
+class QListWidget;
+class QPushButton;
+class QSlider;
+class QTableWidget;
 
 namespace ds4linux::gui {
 
 class IpcClient;
+class LedPicker;
 
-/// Panel for editing and switching profiles.
 class ProfileEditor : public QWidget {
     Q_OBJECT
-
 public:
     explicit ProfileEditor(IpcClient* ipc, QWidget* parent = nullptr);
 
+    /// Reload the profile list from the daemon.
     void refreshProfileList();
 
 signals:
-    void profileActivated(const QString& name);
-
-private slots:
-    void onActivateClicked();
-    void onSaveClicked();
+    /// The set of profile names changed.
+    void profilesChanged(const QStringList& names);
 
 private:
-    IpcClient*      ipc_            = nullptr;
-    QComboBox*      profileCombo_   = nullptr;
-    QLineEdit*      nameEdit_       = nullptr;
-    QComboBox*      outputModeCombo_= nullptr;
-    QCheckBox*      touchpadCheck_  = nullptr;
-    QDoubleSpinBox* rumbleSpin_     = nullptr;
-    QPushButton*    activateBtn_    = nullptr;
-    QPushButton*    saveBtn_        = nullptr;
+    struct DeadzoneControls {
+        QComboBox*      type  = nullptr;   // sticks only
+        QDoubleSpinBox* inner = nullptr;
+        QDoubleSpinBox* outer = nullptr;
+    };
+
+    void loadProfile(const QString& name);
+    void showProfile(const QJsonObject& p);
+    [[nodiscard]] QJsonObject collect() const;
+    void save();
+    void createProfile(bool copyCurrent);
+    void deleteProfile();
+    void setDirty(bool dirty);
+    DeadzoneControls makeDeadzone(bool stick);
+    void setDeadzone(const DeadzoneControls& c, const QJsonObject& dz) const;
+    [[nodiscard]] QJsonObject getDeadzone(const DeadzoneControls& c) const;
+
+    IpcClient*   ipc_       = nullptr;
+    QListWidget* list_      = nullptr;
+    QWidget*     editor_    = nullptr;
+    QLabel*      title_     = nullptr;
+    QComboBox*   output_    = nullptr;
+    LedPicker*   lightbar_  = nullptr;
+    QSlider*     rumble_    = nullptr;
+    QLabel*      rumbleLbl_ = nullptr;
+    DeadzoneControls leftStick_, rightStick_, l2_, r2_;
+    QTableWidget* remap_    = nullptr;
+    QPushButton* saveBtn_   = nullptr;
+    QPushButton* revertBtn_ = nullptr;
+    QPushButton* deleteBtn_ = nullptr;
+
+    QString     current_;
+    QStringList names_;
+    bool        dirty_   = false;
+    bool        loading_ = false;
 };
 
 } // namespace ds4linux::gui

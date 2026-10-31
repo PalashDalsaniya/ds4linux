@@ -192,6 +192,21 @@ bool InputDevice::read_events(const EventHandler& handler) {
     return true;
 }
 
+void InputDevice::replay_current_state(const EventHandler& handler) const {
+    for (unsigned code = 0; code <= KEY_MAX; ++code) {
+        if (libevdev_has_event_code(impl_->dev, EV_KEY, code)) {
+            handler(EV_KEY, static_cast<std::uint16_t>(code),
+                    libevdev_get_event_value(impl_->dev, EV_KEY, code));
+        }
+    }
+    for (unsigned code = 0; code < ABS_MT_SLOT; ++code) {
+        if (libevdev_has_event_code(impl_->dev, EV_ABS, code)) {
+            handler(EV_ABS, static_cast<std::uint16_t>(code),
+                    libevdev_get_event_value(impl_->dev, EV_ABS, code));
+        }
+    }
+}
+
 // ── hidraw helpers ───────────────────────────────────────────────────────────
 
 int InputDevice::open_hidraw() const {
