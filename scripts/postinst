@@ -1,5 +1,6 @@
 #!/bin/sh
-# ds4linux post-install: apply the udev rules and load the uhid module now.
+# ds4linux post-install: apply the udev rules and load the uhid / uinput
+# modules now.
 #
 # This must never fail the package transaction.  On image-based systems
 # (rpm-ostree: Bazzite, Silverblue, ...) scriptlets run in a sandbox without
@@ -16,5 +17,6 @@ if command -v udevadm >/dev/null 2>&1; then
 fi
 
 modprobe uhid >/dev/null 2>&1 || true
+modprobe uinput >/dev/null 2>&1 || true
 
 exit 0

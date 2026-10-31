@@ -2,6 +2,8 @@
 
 #include "ds4linux/device_manager.h"
 #include "ds4linux/constants.h"
+#include "ds4linux/mapping.h"
+#include "ds4linux/virtual_x360.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -10,6 +12,7 @@
 #include <filesystem>
 #include <iostream>
 #include <set>
+#include <utility>
 
 #include <libevdev/libevdev.h>
 #include <fcntl.h>
@@ -307,6 +310,7 @@ void DeviceManager::scan() {
                 slot.touchpad_path = tp_path;
                 slot.touch_x = slot.physical_touchpad->abs_range(ABS_MT_POSITION_X);
                 slot.touch_y = slot.physical_touchpad->abs_range(ABS_MT_POSITION_Y);
+                fds_changed_ = true;
                 std::cout << "[ds4linux] Touchpad active: " << tp_path << "\n";
             } catch (const std::exception& ex) {
                 std::cerr << "[ds4linux] Could not open touchpad "
@@ -321,6 +325,7 @@ void DeviceManager::scan() {
                 slot.motion_path = mo_path;
                 slot.gyro_res  = slot.physical_motion->abs_range(ABS_RX).resolution;
                 slot.accel_res = slot.physical_motion->abs_range(ABS_X).resolution;
+                fds_changed_ = true;
                 std::cout << "[ds4linux] Motion sensors active: " << mo_path << "\n";
             } catch (const std::exception& ex) {
                 std::cerr << "[ds4linux] Could not open motion "
@@ -538,11 +543,6 @@ static constexpr auto kBatteryPollInterval = std::chrono::seconds(5);
 // reports without IMU data, so the motion node exists but stays silent).
 static constexpr auto kMotionStallTimeout = std::chrono::milliseconds(20);
 
-// hid-playstation sets a default lightbar colour while probing the virtual
-// DS4; ignore LED output this soon after opening so it can't override the
-// profile colour already applied to the physical controller.
-static constexpr auto kProbeOutputGrace = std::chrono::seconds(2);
-
 // ── Translate loop ───────────────────────────────────────────────────────────
 
 void DeviceManager::translate_events() {
@@ -587,14 +587,14 @@ void DeviceManager::translate_events() {
             std::cerr << "[ds4linux] Device disconnected: " << path << "\n";
         }
 
-        // ── UHID output (rumble/LED from applications → physical) ───────
+        // ── Virtual output (rumble/LED from applications → physical) ────
         auto out = slot.virtual_dev->take_output();
         if (out.heavy >= 0) {
-            slot.physical->set_rumble(
-                static_cast<std::uint8_t>(out.heavy),
-                static_cast<std::uint8_t>(out.light));
+            slot.game_heavy = out.heavy;
+            slot.game_light = out.light;
         }
-        if (out.led_changed && now - slot.opened_at >= kProbeOutputGrace) {
+        apply_rumble(slot, now);
+        if (out.led_changed) {
             slot.physical->set_lightbar(out.led_r, out.led_g, out.led_b);
         }
 
@@ -623,7 +623,7 @@ void DeviceManager::translate_events() {
                         slot.ds4_state.touchpad = (value != 0);
                     } else if (type == EV_SYN && code == SYN_REPORT) {
                         if (refresh_touches(slot)) {
-                            slot.virtual_dev->send_report(slot.ds4_state);
+                            emit(slot);
                             frame_end = input_sync = false;
                         } else {
                             input_sync = true;
@@ -644,22 +644,168 @@ void DeviceManager::translate_events() {
         // A stalled sensor clock would freeze the report timestamp
         if (!motion_live) slot.ds4_state.has_sensor_time = false;
         if (frame_end || (input_sync && !motion_live)) {
-            slot.virtual_dev->send_report(slot.ds4_state);
+            emit(slot);
         }
     }
 }
 
+/// Map the raw state through the slot's profile and send it to the output.
+void DeviceManager::emit(ControllerSlot& slot) {
+    slot.output_state = apply_profile(slot.ds4_state, slot.profile);
+    slot.virtual_dev->send_report(slot.output_state);
+}
+
+/// Drive the motors with the test rumble while it lasts, otherwise the
+/// applications' level scaled by the profile; write only on a change.
+void DeviceManager::apply_rumble(ControllerSlot& slot,
+                                 std::chrono::steady_clock::time_point now) {
+    const double k = slot.profile.rumble_strength;
+    const bool testing = now < slot.test_rumble_until;
+    const int heavy = testing ? slot.test_heavy : scale_rumble(slot.game_heavy, k);
+    const int light = testing ? slot.test_light : scale_rumble(slot.game_light, k);
+    if (heavy == slot.sent_heavy && light == slot.sent_light) return;
+    slot.physical->set_rumble(static_cast<std::uint8_t>(heavy),
+                              static_cast<std::uint8_t>(light));
+    slot.sent_heavy = heavy;
+    slot.sent_light = light;
+}
+
 // ── Profile ──────────────────────────────────────────────────────────────────
 
-void DeviceManager::set_profile(const std::string& evdev_path, const Profile& p) {
-    auto it = slots_.find(evdev_path);
-    if (it == slots_.end()) return;
-    it->second.profile = p;
+void DeviceManager::create_output(ControllerSlot& slot, OutputMode mode) {
+    // Build the new output before dropping the old one, so a failed switch
+    // leaves the controller working.  Throws if no output can be created.
+    std::unique_ptr<VirtualOutput> out;
+    OutputMode created = mode;
+    if (mode == OutputMode::X360) {
+        try {
+            out = std::make_unique<VirtualX360>();
+        } catch (const std::exception& ex) {
+            std::cerr << "[ds4linux] " << ex.what() << "\n";
+            if (slot.virtual_dev) return;  // keep the current output
+            std::cerr << "[ds4linux] Falling back to DS4 output\n";
+            created = OutputMode::DS4;
+        }
+    }
+    if (!out) {
+        try {
+            out = std::make_unique<VirtualDevice>(slot.virtual_mac);
+        } catch (const std::exception& ex) {
+            if (!slot.virtual_dev) throw;
+            std::cerr << "[ds4linux] " << ex.what() << " — keeping the current output\n";
+            return;
+        }
+    }
+    slot.virtual_dev = std::move(out);
+    slot.output_mode = created;
+    fds_changed_ = true;
+}
 
-    // Apply lightbar immediately
-    it->second.physical->set_lightbar(p.lightbar_color.r,
-                                      p.lightbar_color.g,
-                                      p.lightbar_color.b);
+bool DeviceManager::set_profile(const std::string& evdev_path, const Profile& p) {
+    auto it = slots_.find(evdev_path);
+    if (it == slots_.end()) return false;
+    auto& slot = it->second;
+    slot.profile = p;
+
+    if (p.output_mode != slot.output_mode) {
+        create_output(slot, p.output_mode);  // keeps the old output on failure
+    }
+
+    // Apply lightbar and mapping immediately; rumble scaling applies on the
+    // next pass
+    slot.physical->set_lightbar(p.lightbar_color.r,
+                                p.lightbar_color.g,
+                                p.lightbar_color.b);
+    emit(slot);
+    return true;
+}
+
+void DeviceManager::reapply_profile(const std::string& name) {
+    if (!resolver_) return;
+    for (auto& [path, slot] : slots_) {
+        if (slot.profile.name == name) set_profile(path, resolver_(slot.controller_key));
+    }
+}
+
+bool DeviceManager::set_lightbar(const std::string& evdev_path,
+                                 std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+    auto it = slots_.find(evdev_path);
+    if (it == slots_.end()) return false;
+    it->second.physical->set_lightbar(r, g, b);
+    return true;
+}
+
+bool DeviceManager::test_rumble(const std::string& evdev_path, std::uint8_t heavy,
+                                std::uint8_t light, std::chrono::milliseconds duration) {
+    auto it = slots_.find(evdev_path);
+    if (it == slots_.end()) return false;
+    auto& slot = it->second;
+    const auto now = std::chrono::steady_clock::now();
+    slot.test_heavy        = heavy;
+    slot.test_light        = light;
+    slot.test_rumble_until = now + duration;
+    apply_rumble(slot, now);
+    return true;
+}
+
+std::optional<std::pair<DS4InputState, DS4InputState>>
+DeviceManager::input_state(const std::string& evdev_path) const {
+    auto it = slots_.find(evdev_path);
+    if (it == slots_.end()) return std::nullopt;
+    return std::make_pair(it->second.ds4_state, it->second.output_state);
+}
+
+static const char* model_name(ControllerModel m) {
+    switch (m) {
+    case ControllerModel::DS4v1:         return "DualShock 4 (v1)";
+    case ControllerModel::DS4v2:         return "DualShock 4 (v2)";
+    case ControllerModel::DualSense:     return "DualSense";
+    case ControllerModel::DualSenseEdge: return "DualSense Edge";
+    case ControllerModel::Generic:       return "Generic gamepad";
+    }
+    return "Unknown";
+}
+
+std::vector<DeviceInfo> DeviceManager::device_info() const {
+    std::vector<DeviceInfo> out;
+    for (const auto& [path, slot] : slots_) {
+        DeviceInfo d;
+        d.path       = path;
+        d.name       = slot.physical->name();
+        d.model      = model_name(slot.physical->model());
+        d.connection = slot.physical->connection() == ConnectionType::Bluetooth
+                           ? "bluetooth" : "usb";
+        char mac[18];
+        std::snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                      slot.virtual_mac[0], slot.virtual_mac[1], slot.virtual_mac[2],
+                      slot.virtual_mac[3], slot.virtual_mac[4], slot.virtual_mac[5]);
+        d.mac            = mac;
+        d.controller_key = slot.controller_key;
+        d.profile        = slot.profile.name;
+        d.output_mode    = slot.output_mode;
+        d.battery        = slot.ds4_state.battery;
+        d.has_touchpad   = static_cast<bool>(slot.physical_touchpad);
+        d.has_motion     = static_cast<bool>(slot.physical_motion);
+        out.push_back(std::move(d));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const auto& a, const auto& b) { return a.path < b.path; });
+    return out;
+}
+
+std::vector<int> DeviceManager::poll_fds() const {
+    std::vector<int> fds;
+    for (const auto& [path, slot] : slots_) {
+        if (slot.physical)          fds.push_back(slot.physical->fd());
+        if (slot.physical_touchpad) fds.push_back(slot.physical_touchpad->fd());
+        if (slot.physical_motion)   fds.push_back(slot.physical_motion->fd());
+        if (slot.virtual_dev)       fds.push_back(slot.virtual_dev->output_fd());
+    }
+    return fds;
+}
+
+bool DeviceManager::take_fds_changed() noexcept {
+    return std::exchange(fds_changed_, false);
 }
 
 // ── Internal ─────────────────────────────────────────────────────────────────
@@ -670,27 +816,35 @@ bool DeviceManager::open_slot(const std::string& evdev_path,
         ControllerSlot slot;
         slot.evdev_path  = evdev_path;
         slot.physical_id = physical_id;
-        slot.opened_at   = std::chrono::steady_clock::now();
         slot.physical    = std::make_unique<InputDevice>(evdev_path, /*grab=*/true);
         slot.gamepad_map = build_gamepad_map(*slot.physical);
+        slot.physical->replay_current_state(
+            [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
+                apply_gamepad_event(slot, type, code, value);
+            });
 
         const std::string uniq = slot.physical->uniq();
-        const std::string seed = !uniq.empty()        ? uniq
-                               : !physical_id.empty() ? physical_id
-                                                      : evdev_path;
-        slot.virtual_mac = allocate_virtual_mac(seed, uniq);
-        slot.virtual_dev = std::make_unique<VirtualDevice>(slot.virtual_mac);
+        slot.controller_key = !uniq.empty()        ? uniq
+                            : !physical_id.empty() ? physical_id
+                                                   : evdev_path;
+        slot.virtual_mac = allocate_virtual_mac(slot.controller_key, uniq);
+        slot.profile     = resolver_ ? resolver_(slot.controller_key) : Profile{};
+        create_output(slot, slot.profile.output_mode);
 
         std::cout << "[ds4linux] Opened controller: "
                   << slot.physical->name()
-                  << " @ " << evdev_path << "\n";
+                  << " @ " << evdev_path
+                  << " (profile \"" << slot.profile.name << "\")\n";
 
-        // Apply default lightbar color
+        // Apply the profile's lightbar color
         slot.physical->set_lightbar(slot.profile.lightbar_color.r,
                                     slot.profile.lightbar_color.g,
                                     slot.profile.lightbar_color.b);
 
+        emit(slot);  // publish the seeded state (held buttons, deflected sticks)
+
         slots_.emplace(evdev_path, std::move(slot));
+        fds_changed_ = true;
         return true;
     } catch (const std::exception& ex) {
         std::cerr << "[ds4linux] Could not open " << evdev_path << ": "
@@ -700,7 +854,7 @@ bool DeviceManager::open_slot(const std::string& evdev_path,
 }
 
 void DeviceManager::close_slot(const std::string& evdev_path) {
-    slots_.erase(evdev_path);
+    if (slots_.erase(evdev_path)) fds_changed_ = true;
 }
 
 } // namespace ds4linux::daemon

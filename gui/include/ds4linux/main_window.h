@@ -2,42 +2,40 @@
 // ds4linux GUI — Main window
 
 #include <QMainWindow>
-#include <QTimer>
-#include <QVBoxLayout>
-#include <QStatusBar>
+#include <QString>
+
+class QLabel;
+class QTabWidget;
+class QTimer;
 
 namespace ds4linux::gui {
 
+class ControllersPage;
 class IpcClient;
-class DeviceWidget;
 class ProfileEditor;
-class LedPicker;
+class TesterPage;
 
-/// Top-level application window.
+/// Top-level application window: Controllers, Profiles and Tester tabs.
 class MainWindow : public QMainWindow {
     Q_OBJECT
-
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    explicit MainWindow(QString socketPath, QWidget* parent = nullptr);
     ~MainWindow() override;
 
-private slots:
-    void onDaemonConnected();
-    void onDaemonDisconnected();
-    void onDaemonMessage(const QString& json);
-    void pollDevices();
-
 private:
-    void setupUi();
     void connectToDaemon();
+    void onConnected();
+    void onDisconnected();
 
-    IpcClient*     ipc_          = nullptr;
-    ProfileEditor* profileEditor_= nullptr;
-    LedPicker*     ledPicker_    = nullptr;
-    QWidget*       devicesPanel_ = nullptr;
-    QVBoxLayout*   devicesLayout_= nullptr;
-    QTimer*        pollTimer_    = nullptr;
-    QStatusBar*    statusBar_    = nullptr;
+    QString          socketPath_;
+    IpcClient*       ipc_         = nullptr;
+    QTabWidget*      tabs_        = nullptr;
+    ControllersPage* controllers_ = nullptr;
+    ProfileEditor*   profiles_    = nullptr;
+    TesterPage*      tester_      = nullptr;
+    QLabel*          offline_     = nullptr;
+    QTimer*          pollTimer_   = nullptr;
+    QTimer*          retryTimer_  = nullptr;
 };
 
 } // namespace ds4linux::gui

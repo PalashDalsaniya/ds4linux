@@ -1,16 +1,18 @@
 
 # ds4linux
 
-A native Linux clone of [DS4Windows](https://ds4-windows.com/download/) - a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uhid`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 device, and forwards all input and LED control. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
+A native Linux clone of [DS4Windows](https://ds4-windows.com/download/) - a daemon that bridges Sony DualShock 4 / DualSense controllers to a virtual DS4 device using `libevdev`, `uhid`, and `hidraw`. It grabs exclusive access to the physical controller, creates a virtual DualShock 4 (or Xbox 360) controller, and forwards input, rumble and lightbar control, with per-controller profiles for deadzones, button remapping, rumble strength and lightbar colour. This hides the real hardware from other applications (including Steam) so only the clean virtual device is visible.
 
 ## How It Works
 
 The daemon:
 1. Detects connected DualShock 4 / DualSense controllers.
 2. Grabs exclusive access via `libevdev` so no other process sees the raw device.
-3. Creates a virtual DualShock 4 controller via Linux `uhid` (with its own hidraw node, touchpad and motion sensors).
-4. Forwards all input events.
+3. Creates a virtual DualShock 4 controller via Linux `uhid` (with its own hidraw node, touchpad and motion sensors), or a virtual Xbox 360 controller via `uinput`.
+4. Forwards all input events through the controller's profile (deadzones, button remaps), and rumble / lightbar output back to the controller.
 5. Installs udev rules to hide the physical controller and expose only the virtual one.
+
+You control it with the `ds4linux-ctl` command or the `ds4linux-gui` app.
 
 
 ## Prerequisites
@@ -81,10 +83,12 @@ sudo cmake --install build --prefix /usr
 sudo cp config/99-ds4linux.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 
-# Load uhid module
-sudo modprobe uhid
-echo "uhid" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
+# Load the uhid (virtual DS4) and uinput (virtual Xbox 360) modules
+sudo modprobe uhid uinput
+printf 'uhid\nuinput\n' | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
 ```
+
+To also build the GUI (needs Qt 6: `sudo pacman -S qt6-base`), add `-DDS4LINUX_BUILD_GUI=ON` to the first `cmake` command.
 
 
 ## Usage
@@ -119,6 +123,42 @@ sudo systemctl enable --now ds4linux.service
 
 Extra daemon options go in `/etc/default/ds4linux`, for example `DS4LINUX_ARGS=--generic`. Restart the service after changing it.
 
+### Controlling the daemon: `ds4linux-ctl`
+
+Everything can be done from the command line while the daemon runs. Commands that act on controllers apply to all of them unless you pick one with `-d <number>` (from `list`):
+
+```bash
+ds4linux-ctl list                          # controllers, battery, profile, emulated controller
+ds4linux-ctl test                          # live view of the controller's input
+ds4linux-ctl lightbar '#ff0080'            # try a lightbar colour
+ds4linux-ctl rumble 200 100 500            # test rumble: heavy, light, milliseconds
+
+ds4linux-ctl profile new Racing            # create a profile (copy of Default)
+ds4linux-ctl profile set Racing output x360        # emulate an Xbox 360 controller
+ds4linux-ctl profile set Racing lightbar '#ff4400'
+ds4linux-ctl profile set Racing rumble 60          # rumble strength in percent
+ds4linux-ctl profile set Racing left-stick 10,90,circular   # inner%, outer%, type
+ds4linux-ctl profile set Racing r2 5               # trigger deadzone
+ds4linux-ctl profile remap Racing cross circle     # Cross acts as Circle
+ds4linux-ctl profile remap Racing ps none          # disable the PS button
+ds4linux-ctl -d 1 profile use Racing               # use it on controller 1 (remembered)
+```
+
+Run `ds4linux-ctl --help` for the full list (including `profile import` / `export`).
+
+### GUI
+
+The GUI is not in the release packages yet; build it from source with `-DDS4LINUX_BUILD_GUI=ON` (see [Manual Build](#manual-build)). `ds4linux-gui` shows the connected controllers (battery, profile, emulated controller), edits profiles (emulated controller, lightbar, rumble strength, stick and trigger deadzones, button remapping) and has a live controller tester that shows both the raw input and what games receive after the profile. It talks to the running daemon, so start the daemon first.
+
+### Profiles
+
+Profiles are stored by the daemon in `/var/lib/ds4linux/profiles/`, and each controller remembers the profile it was last set to. A profile sets:
+
+- **Emulated controller:** DualShock 4 (default) or Xbox 360. Xbox 360 mode is for games that only support Xbox controllers; it has no touchpad, motion sensors or lightbar control from games.
+- **Lightbar colour** and **rumble strength**.
+- **Deadzones** for both sticks (circular or square) and both triggers.
+- **Button remapping**: any button can act as another button, or be disabled.
+
 ### Generic (non-Sony) controllers
 
 ds4linux can also present other gamepads (Xbox, Logitech, 8BitDo, ...) as a virtual DualShock 4, so games show PlayStation button prompts. This is off by default because the daemon takes exclusive control of every controller it emulates:
@@ -147,9 +187,11 @@ ds4linux/
 ├── daemon/                     # Backend daemon
 │   ├── include/ds4linux/
 │   └── src/
+├── cli/                        # ds4linux-ctl command-line tool
 ├── gui/                        # Qt 6 frontend
 │   ├── include/ds4linux/
 │   └── src/
+├── tests/                      # Unit and kernel-level tests (ctest)
 ├── config/                     # udev rules, systemd unit, default profile
 └── scripts/                    # Build & install script
 ```
@@ -160,6 +202,8 @@ ds4linux/
 - **Daemon doesn't detect controller:** Make sure the controller is connected (USB or Bluetooth) *before* starting the daemon.
 - **Steam shows duplicate controllers:** Ensure the udev rules are installed (`/etc/udev/rules.d/99-ds4linux.rules`) and that Steam was launched *after* the daemon.
 - **Permission errors:** The daemon needs root. Run with `sudo`.
+- **`ds4linux-ctl` / the GUI can't connect:** The daemon isn't running (or was started with a different `--socket`). Start it with `sudo ds4linux-daemon` or `sudo systemctl start ds4linux`.
+- **Xbox 360 mode falls back to DualShock 4:** The `uinput` module isn't loaded. Run `sudo modprobe uinput`.
 
 
 ## Game Compatibility
@@ -183,15 +227,15 @@ If you have tested ds4linux with a game, please let me know so I can add it to t
 
 # Roadmap
 
-- Fix rumble functionality (currently not working)
-- Resurrect GUI development
-- take input from xbox or generic controller and translate to dualshock
-- Add input support for standard Xbox, Nintendo Switch Pro, Dualshock 3, and Generic controllers (auto detected)
-- Add Xbox 360 controller emulation
-- have option to switch and choose between virtual ds4 or xbox360
-- Add Visual Controller Tester
-- options to control everything without GUI using CLI
-- custom lightbar colors on supported controllers
-- Custom settings profiles
-- button remapping
-- Emulate Dualsense so it can connect it by bluetooth and have functional adaptive triggers (for games that only support it on usb)
+- [x] Fix rumble functionality
+- [x] Resurrect GUI development
+- [x] take input from xbox or generic controller and translate to dualshock (`--generic`)
+- [ ] Add input support for standard Xbox, Nintendo Switch Pro, Dualshock 3, and Generic controllers (auto detected)
+- [x] Add Xbox 360 controller emulation
+- [x] have option to switch and choose between virtual ds4 or xbox360
+- [x] Add Visual Controller Tester
+- [x] options to control everything without GUI using CLI
+- [x] custom lightbar colors on supported controllers
+- [x] Custom settings profiles
+- [x] button remapping
+- [ ] Emulate Dualsense so it can connect it by bluetooth and have functional adaptive triggers (for games that only support it on usb)

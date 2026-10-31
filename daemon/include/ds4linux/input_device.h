@@ -84,6 +84,11 @@ public:
                                             std::int32_t  value)>;
     bool read_events(const EventHandler& handler);
 
+    /// Call `handler` with the current value of every key and absolute axis
+    /// the device has — evdev only reports changes, so this seeds state that
+    /// was already held when the device was opened.
+    void replay_current_state(const EventHandler& handler) const;
+
     /// Open the corresponding hidraw device for LED / rumble control.
     /// Returns the fd, or -1 if not found.
     [[nodiscard]] int open_hidraw() const;
@@ -93,9 +98,6 @@ public:
 
     /// Set rumble motors via hidraw.
     bool set_rumble(std::uint8_t heavy, std::uint8_t light);
-
-    /// Read battery percentage (0–100, or -1 on failure).
-    [[nodiscard]] int battery_percent() const;
 
     /// Read this controller's battery level and charging state from sysfs.
     [[nodiscard]] BatteryInfo battery() const;
@@ -115,6 +117,8 @@ public:
 
 private:
     bool send_ds4_output();
+    bool send_dualsense_output();
+    void detect_dualsense_vibration_mode();
     bool send_ff_rumble(std::uint8_t heavy, std::uint8_t light);
 
     struct Impl;

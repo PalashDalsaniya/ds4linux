@@ -9,7 +9,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -42,8 +44,10 @@ struct ControllerSlot {
     std::unique_ptr<InputDevice>   physical_touchpad; // touchpad
     std::unique_ptr<InputDevice>   physical_motion;   // motion sensors
 
-    // Virtual output device (UHID DS4 — carries gamepad, touchpad and IMU data)
-    std::unique_ptr<VirtualDevice> virtual_dev;
+    // Virtual output device (UHID DS4 carrying gamepad, touchpad and IMU
+    // data, or a uinput Xbox 360 pad), selected by the profile's output mode
+    std::unique_ptr<VirtualOutput> virtual_dev;
+    OutputMode                     output_mode = OutputMode::DS4;
     std::array<std::uint8_t, 6>    virtual_mac{};
 
     // Input normalisation for this controller
@@ -53,22 +57,43 @@ struct ControllerSlot {
     int        accel_res = 0;         // units per g     (0 = driver default)
     struct { bool up = false, down = false, left = false, right = false; } dpad_btn;
 
-    // Accumulated DS4 state (packed into one HID report per physical frame)
+    // Accumulated DS4 state from the physical controller (before the profile
+    // is applied), and the last state sent to the virtual output (after)
     DS4InputState ds4_state;
+    DS4InputState output_state;
+
+    // Rumble: the applications' level, a test override that wins until
+    // test_rumble_until, and the level last sent to the motors (-1 = none)
+    int game_heavy = 0, game_light = 0;
+    int test_heavy = 0, test_light = 0;
+    std::chrono::steady_clock::time_point test_rumble_until{};
+    int sent_heavy = -1, sent_light = -1;
+
     std::chrono::steady_clock::time_point next_battery_poll{};
     std::chrono::steady_clock::time_point last_motion_sync{};  // epoch = never
-    std::chrono::steady_clock::time_point opened_at{};
 
     Profile     profile;
+    std::string controller_key;      // stable ID for profile assignment (MAC / sysfs path)
     std::string evdev_path;          // gamepad event node path
     std::string physical_id;         // sysfs path of the parent HID/USB device
     std::string touchpad_path;       // touchpad event node path (if found)
     std::string motion_path;         // motion event node path (if found)
 };
 
+/// Summary of a controller for status queries (IPC).
+struct DeviceInfo {
+    std::string path, name, model, connection, mac, controller_key, profile;
+    OutputMode  output_mode = OutputMode::DS4;
+    BatteryInfo battery;
+    bool has_touchpad = false, has_motion = false;
+};
+
 /// Manages discovery, hotplug, and the translate loop for all controllers.
 class DeviceManager {
 public:
+    /// Looks up the profile for a newly opened controller (by controller key).
+    using ProfileResolver = std::function<Profile(const std::string& controller_key)>;
+
     explicit DeviceManager(DeviceManagerOptions options = {});
     ~DeviceManager();
 
@@ -89,13 +114,44 @@ public:
     /// Best called from an epoll wait.
     void translate_events();
 
-    /// Set profile on a slot (by evdev path).
-    void set_profile(const std::string& evdev_path, const Profile& p);
+    /// Set profile on a slot (by evdev path): applies the lightbar colour and
+    /// switches the virtual output if the output mode changed.
+    /// Returns false if there is no such slot.
+    bool set_profile(const std::string& evdev_path, const Profile& p);
+
+    /// Reload (via the profile resolver) every slot currently using the
+    /// profile `name` — after it was saved or deleted.
+    void reapply_profile(const std::string& name);
+
+    void set_profile_resolver(ProfileResolver resolver) { resolver_ = std::move(resolver); }
+
+    /// Temporarily set the physical lightbar (until the next profile change).
+    bool set_lightbar(const std::string& evdev_path, std::uint8_t r, std::uint8_t g, std::uint8_t b);
+
+    /// Play a rumble on the physical controller for `duration`.
+    bool test_rumble(const std::string& evdev_path, std::uint8_t heavy, std::uint8_t light,
+                     std::chrono::milliseconds duration);
+
+    /// Raw input and mapped output state of a controller (for the tester).
+    [[nodiscard]] std::optional<std::pair<DS4InputState, DS4InputState>>
+    input_state(const std::string& evdev_path) const;
+
+    [[nodiscard]] std::vector<DeviceInfo> device_info() const;
+
+    /// File descriptors to wait on (physical nodes and virtual outputs).
+    [[nodiscard]] std::vector<int> poll_fds() const;
+
+    /// True once after the set of poll_fds() changed (slot or output added /
+    /// removed), so the caller can rebuild its epoll set.
+    [[nodiscard]] bool take_fds_changed() noexcept;
 
     /// Access all active slots (for status queries).
     [[nodiscard]] const auto& slots() const noexcept { return slots_; }
 
 private:
+    void emit(ControllerSlot& slot);
+    void apply_rumble(ControllerSlot& slot, std::chrono::steady_clock::time_point now);
+    void create_output(ControllerSlot& slot, OutputMode mode);
     bool open_slot(const std::string& evdev_path, const std::string& physical_id);
     void close_slot(const std::string& evdev_path);
     [[nodiscard]] bool generic_allowed(std::uint16_t vid, std::uint16_t pid) const;
@@ -103,6 +159,8 @@ private:
     allocate_virtual_mac(const std::string& seed, const std::string& physical_uniq) const;
 
     DeviceManagerOptions options_;
+    ProfileResolver resolver_;
+    bool fds_changed_ = true;
     std::unordered_map<std::string, ControllerSlot> slots_;
 };
 

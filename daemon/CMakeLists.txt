@@ -7,6 +7,11 @@ add_executable(ds4linux-daemon
     src/input_device.cpp
     src/virtual_device.cpp
     src/device_manager.cpp
+    src/virtual_x360.cpp
+    src/mapping.cpp
+    src/profile_manager.cpp
+    src/ipc_server.cpp
+    src/ipc_handler.cpp
 )
 
 target_include_directories(ds4linux-daemon PRIVATE
