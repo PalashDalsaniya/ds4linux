@@ -48,6 +48,11 @@ struct IpcServer::Impl {
 IpcServer::IpcServer(const std::string& socket_path)
     : impl_(std::make_unique<Impl>())
 {
+    struct sockaddr_un addr{};
+    if (socket_path.size() >= sizeof(addr.sun_path)) {
+        throw std::system_error(ENAMETOOLONG, std::system_category(),
+                                "socket path too long: " + socket_path);
+    }
     impl_->socket_path = socket_path;
 
     // Remove stale socket
@@ -58,9 +63,8 @@ IpcServer::IpcServer(const std::string& socket_path)
         throw std::system_error(errno, std::system_category(), "socket() failed");
     }
 
-    struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+    std::memcpy(addr.sun_path, socket_path.c_str(), socket_path.size() + 1);
 
     if (::bind(impl_->listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         throw std::system_error(errno, std::system_category(),
