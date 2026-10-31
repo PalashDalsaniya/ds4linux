@@ -37,3 +37,4 @@ target_link_libraries(ds4linux-gui PRIVATE
 target_compile_features(ds4linux-gui PRIVATE cxx_std_20)
 
 install(TARGETS ds4linux-gui DESTINATION bin)
+install(FILES ds4linux.desktop DESTINATION share/applications)
