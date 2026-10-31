@@ -115,6 +115,8 @@ public:
 
 private:
     bool send_ds4_output();
+    bool send_dualsense_output();
+    void detect_dualsense_vibration_mode();
     bool send_ff_rumble(std::uint8_t heavy, std::uint8_t light);
 
     struct Impl;

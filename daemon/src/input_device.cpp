@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <linux/hidraw.h>
 #include <linux/input.h>
 #include <stdexcept>
 #include <sys/ioctl.h>
@@ -63,6 +64,15 @@ struct InputDevice::Impl {
         std::uint8_t heavy = 0, light = 0;
         std::uint8_t r = 0, g = 0, b = 0;
     } ds4_out;
+
+    // Persistent DualSense output state, sent as one combined report.
+    struct {
+        bool rumble_valid = false, light_valid = false;
+        std::uint8_t heavy = 0, light = 0;
+        std::uint8_t r = 0, g = 0, b = 0;
+        std::uint8_t bt_seq = 0;
+    } ds_out;
+    bool ds_vibration_v2 = true;   // see detect_dualsense_vibration_mode()
 
     int ff_effect_id = -1;   // uploaded FF_RUMBLE effect (generic pads)
 
@@ -132,6 +142,10 @@ InputDevice::InputDevice(const std::string& evdev_path, bool grab_exclusive)
     impl_->hidraw_fd_ = open_hidraw();
     if (impl_->hidraw_fd_ >= 0) {
         std::cout << "[ds4linux] Acquired hidraw for " << evdev_path << "\n";
+    }
+
+    if (impl_->model_ == ControllerModel::DualSense) {
+        detect_dualsense_vibration_mode();
     }
 }
 
@@ -249,6 +263,79 @@ bool InputDevice::send_ds4_output() {
     return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
 }
 
+// ── DualSense output (report 0x02 over USB, 0x31 + CRC32 over Bluetooth) ────
+// Layout from drivers/hid/hid-playstation.c (dualsense_output_report_*):
+//   common: [0] valid_flag0 [1] valid_flag1 [2] motor_right [3] motor_left
+//           [38] valid_flag2 [44..46] lightbar RGB
+//   USB: id 0x02 @0, common @1, 63 bytes total
+//   BT:  id 0x31 @0, seq << 4 @1, tag 0x10 @2, common @3,
+//        CRC32 (seed 0xA2) over bytes 0..73 @74, 78 bytes total
+// Rumble and lightbar always go out together with persistent state so one
+// update never resets the other.  Based on the fix proposed in PR #3.
+
+void InputDevice::detect_dualsense_vibration_mode() {
+    // Original DualSense firmware only supports the classic rumble emulation;
+    // "vibration v2" needs feature version 2.21+ (firmware info report 0x20,
+    // LE16 update_version at offset 44).  The DualSense Edge always has it.
+    if (impl_->hidraw_fd_ < 0) return;
+    std::uint8_t buf[64]{};
+    buf[0] = 0x20;
+    if (::ioctl(impl_->hidraw_fd_, HIDIOCGFEATURE(sizeof(buf)), buf) < 46) return;
+    const unsigned update_version = buf[44] | (buf[45] << 8);
+    impl_->ds_vibration_v2 = update_version >= 0x0215;  // DS_FEATURE_VERSION(2, 21)
+}
+
+bool InputDevice::send_dualsense_output() {
+    if (impl_->hidraw_fd_ < 0) {
+        impl_->hidraw_fd_ = open_hidraw();
+    }
+    if (impl_->hidraw_fd_ < 0) return false;
+
+    constexpr std::uint8_t kFlag0CompatVibration  = 0x01;
+    constexpr std::uint8_t kFlag0HapticsSelect    = 0x02;
+    constexpr std::uint8_t kFlag1LightbarEnable   = 0x04;
+    constexpr std::uint8_t kFlag2CompatVibration2 = 0x04;
+    auto& st = impl_->ds_out;
+
+    auto fill_common = [&](std::uint8_t* c) {
+        if (st.rumble_valid) {
+            c[0] |= kFlag0HapticsSelect;
+            if (impl_->ds_vibration_v2) c[38] |= kFlag2CompatVibration2;
+            else                        c[0]  |= kFlag0CompatVibration;
+            c[2] = st.light;  // motor_right (weak)
+            c[3] = st.heavy;  // motor_left (strong)
+        }
+        if (st.light_valid) {
+            c[1] |= kFlag1LightbarEnable;
+            c[44] = st.r;
+            c[45] = st.g;
+            c[46] = st.b;
+        }
+    };
+
+    if (impl_->conn_ == ConnectionType::Bluetooth) {
+        std::uint8_t buf[78]{};
+        buf[0] = 0x31;
+        buf[1] = static_cast<std::uint8_t>(st.bt_seq << 4);
+        st.bt_seq = static_cast<std::uint8_t>((st.bt_seq + 1) & 0x0F);
+        buf[2] = 0x10;
+        fill_common(buf + 3);
+        std::uint8_t seed = 0xA2;
+        std::uint32_t crc = crc32_le(0xFFFFFFFFu, &seed, 1);
+        crc = ~crc32_le(crc, buf, sizeof(buf) - 4);
+        buf[74] = static_cast<std::uint8_t>(crc & 0xFF);
+        buf[75] = static_cast<std::uint8_t>((crc >> 8) & 0xFF);
+        buf[76] = static_cast<std::uint8_t>((crc >> 16) & 0xFF);
+        buf[77] = static_cast<std::uint8_t>((crc >> 24) & 0xFF);
+        return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+    }
+
+    std::uint8_t buf[63]{};
+    buf[0] = 0x02;
+    fill_common(buf + 1);
+    return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+}
+
 // ── Force-feedback rumble (generic evdev gamepads) ──────────────────────────
 
 bool InputDevice::send_ff_rumble(std::uint8_t heavy, std::uint8_t light) {
@@ -288,15 +375,12 @@ bool InputDevice::set_lightbar(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
 
     if (impl_->model_ == ControllerModel::DualSense ||
         impl_->model_ == ControllerModel::DualSenseEdge) {
-        // DualSense USB output report 0x02, 48 bytes
-        std::uint8_t buf[48]{};
-        buf[0] = 0x02;
-        buf[1] = 0x04; // flags: lightbar
-        buf[2] = 0x00;
-        buf[45] = r;
-        buf[46] = g;
-        buf[47] = b;
-        return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+        auto& st = impl_->ds_out;
+        st.light_valid = true;
+        st.r = r;
+        st.g = g;
+        st.b = b;
+        return send_dualsense_output();
     } else {
         impl_->ds4_out.r = r;
         impl_->ds4_out.g = g;
@@ -316,19 +400,11 @@ bool InputDevice::set_rumble(std::uint8_t heavy, std::uint8_t light) {
 
     if (impl_->model_ == ControllerModel::DualSense ||
         impl_->model_ == ControllerModel::DualSenseEdge) {
-        // DualSense USB output report 0x02, 48 bytes
-        // Byte 0: report ID (0x02)
-        // Byte 1: valid_flag0 — 0x01 = haptics enable, 0x02 = haptics disable
-        // Byte 2: valid_flag1
-        // Byte 3: right motor (light/weak)
-        // Byte 4: left motor (heavy/strong)
-        std::uint8_t buf[48]{};
-        buf[0] = 0x02;
-        buf[1] = 0x01 | 0x02; // enable haptics + motor control
-        buf[2] = 0x00;
-        buf[3] = light;
-        buf[4] = heavy;
-        return ::write(impl_->hidraw_fd_, buf, sizeof(buf)) >= 0;
+        auto& st = impl_->ds_out;
+        st.rumble_valid = true;
+        st.heavy = heavy;
+        st.light = light;
+        return send_dualsense_output();
     } else {
         impl_->ds4_out.heavy = heavy;
         impl_->ds4_out.light = light;
