@@ -26,6 +26,10 @@ struct RequestError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+// The control socket is world-writable; bound what clients can make the
+// (root) daemon write to disk.
+constexpr std::size_t kMaxProfiles = 256;
+
 const char* output_mode_name(OutputMode m) {
     return m == OutputMode::X360 ? "x360" : "ds4";
 }
@@ -170,9 +174,20 @@ std::string IpcHandler::handle(const std::string& request) {
             if (!req.contains("profile") || !req["profile"].is_object()) {
                 throw RequestError("Missing object field: profile");
             }
-            const Profile p = profile_from_json(req["profile"].dump());
+            // Require an explicit name: a nameless profile would otherwise
+            // default to "Default" and silently overwrite it
+            const auto& body = req["profile"];
+            if (!body.contains("name") || !body["name"].is_string()) {
+                throw RequestError("The profile has no name");
+            }
+            const Profile p = profile_from_json(body.dump());
             if (!is_valid_profile_name(p.name)) {
                 throw RequestError("Invalid profile name (use letters, digits, space, _ . -)");
+            }
+            const auto existing = profiles_.list();
+            if (std::find(existing.begin(), existing.end(), p.name) == existing.end() &&
+                existing.size() >= kMaxProfiles) {
+                throw RequestError("Too many profiles (limit " + std::to_string(kMaxProfiles) + ")");
             }
             profiles_.save(p);
             devices_.update_profile(p);

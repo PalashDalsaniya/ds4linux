@@ -148,7 +148,7 @@ Run `ds4linux-ctl --help` for the full list (including `profile import` / `expor
 
 ### GUI
 
-`ds4linux-gui` shows the connected controllers (battery, profile, emulated controller), edits profiles (emulated controller, lightbar, rumble strength, stick and trigger deadzones, button remapping) and has a live controller tester that shows both the raw input and what games receive after the profile. It talks to the running daemon, so start the daemon first.
+The GUI is not in the release packages yet; build it from source with `-DDS4LINUX_BUILD_GUI=ON` (see [Manual Build](#manual-build)). `ds4linux-gui` shows the connected controllers (battery, profile, emulated controller), edits profiles (emulated controller, lightbar, rumble strength, stick and trigger deadzones, button remapping) and has a live controller tester that shows both the raw input and what games receive after the profile. It talks to the running daemon, so start the daemon first.
 
 ### Profiles
 

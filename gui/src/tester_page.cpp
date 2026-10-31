@@ -203,6 +203,17 @@ TesterPage::TesterPage(IpcClient* ipc, QWidget* parent)
 }
 
 void TesterPage::setDevices(const QJsonArray& devices) {
+    // Called on every controller refresh; only rebuild the chooser (which
+    // would close it if open) when the set of controllers changed.
+    QString key;
+    for (const auto& v : devices) {
+        const auto d = v.toObject();
+        key += d.value("path").toString() + d.value("model").toString() +
+               d.value("connection").toString() + '\n';
+    }
+    if (key == devicesKey_ && device_->count() == devices.size()) return;
+    devicesKey_ = key;
+
     const QString selected = device_->currentData().toString();
     QSignalBlocker block(device_);
     device_->clear();
