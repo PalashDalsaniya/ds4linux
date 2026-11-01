@@ -13,6 +13,7 @@ echo "[1/4] Installing dependencies..."
 sudo pacman -S --needed --noconfirm \
     cmake ninja gcc \
     libevdev \
+    systemd-libs \
     nlohmann-json
 
 # ── 2. Build the daemon ──────────────────────────────────────────────────────

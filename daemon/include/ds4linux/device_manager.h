@@ -86,8 +86,8 @@ public:
     void on_device_removed(const std::string& evdev_path);
 
     /// Run one iteration of the translate loop for all slots.
-    /// Best called from an epoll wait.
-    void translate_events();
+    /// Returns primary gamepad paths that disconnected during the pass.
+    [[nodiscard]] std::vector<std::string> translate_events();
 
     /// Set profile on a slot (by evdev path).
     void set_profile(const std::string& evdev_path, const Profile& p);

@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <libudev.h>
 #include <sstream>
 #include <string>
 #include <sys/epoll.h>
@@ -114,6 +115,30 @@ int main(int argc, char** argv) {
     ::sigaction(SIGINT,  &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
 
+    // ── udev monitor ─────────────────────────────────────────────────────────
+    struct udev* udev = udev_new();
+    if (!udev) {
+        std::cerr << "[ds4linux] Could not create udev context\n";
+        return EXIT_FAILURE;
+    }
+    struct udev_monitor* udev_monitor =
+        udev_monitor_new_from_netlink(udev, "udev");
+    if (!udev_monitor ||
+        udev_monitor_filter_add_match_subsystem_devtype(udev_monitor, "input", nullptr) < 0 ||
+        udev_monitor_enable_receiving(udev_monitor) < 0) {
+        std::cerr << "[ds4linux] Could not start udev monitor\n";
+        if (udev_monitor) udev_monitor_unref(udev_monitor);
+        udev_unref(udev);
+        return EXIT_FAILURE;
+    }
+    const int udev_fd = udev_monitor_get_fd(udev_monitor);
+    if (udev_fd < 0) {
+        std::cerr << "[ds4linux] Could not get udev monitor fd\n";
+        udev_monitor_unref(udev_monitor);
+        udev_unref(udev);
+        return EXIT_FAILURE;
+    }
+
     // ── Device manager ───────────────────────────────────────────────────────
     DeviceManager devmgr(options);
     devmgr.scan();
@@ -122,6 +147,8 @@ int main(int argc, char** argv) {
     int epfd = ::epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) {
         perror("epoll_create1");
+        udev_monitor_unref(udev_monitor);
+        udev_unref(udev);
         return EXIT_FAILURE;
     }
 
@@ -146,6 +173,20 @@ int main(int argc, char** argv) {
         }
     };
 
+    auto unregister_path = [&](const std::string& path) {
+        for (auto it = registered_fds.begin(); it != registered_fds.end();) {
+            if (it->second != path) {
+                ++it;
+                continue;
+            }
+            if (::epoll_ctl(epfd, EPOLL_CTL_DEL, it->first, nullptr) < 0) {
+                perror("epoll_ctl DEL");
+            }
+            it = registered_fds.erase(it);
+        }
+    };
+
+    epoll_add(epfd, udev_fd);
     sync_epoll();
 
     if (devmgr.slots().empty()) {
@@ -161,11 +202,42 @@ int main(int argc, char** argv) {
         int nfds = ::epoll_wait(epfd, events, kEpollMaxEvents, 200 /*ms*/);
 
         if (nfds > 0) {
-            devmgr.translate_events();
+            bool rescan = false;
+            for (int i = 0; i < nfds; ++i) {
+                if (events[i].data.fd != udev_fd) continue;
+
+                while (struct udev_device* device =
+                           udev_monitor_receive_device(udev_monitor)) {
+                    const char* action = udev_device_get_action(device);
+                    const char* sysname = udev_device_get_sysname(device);
+                    if (action && sysname && !std::strncmp(sysname, "event", 5)) {
+                        const std::string path = std::string("/dev/input/") + sysname;
+                        if (!std::strcmp(action, "remove")) {
+                            if (devmgr.slots().count(path)) {
+                                unregister_path(path);
+                                devmgr.on_device_removed(path);
+                            }
+                        } else if (!std::strcmp(action, "add")) {
+                            rescan = true;
+                        }
+                    }
+                    udev_device_unref(device);
+                }
+            }
+            if (rescan) {
+                devmgr.scan();
+                sync_epoll();
+            }
+            for (const auto& path : devmgr.translate_events()) {
+                unregister_path(path);
+                devmgr.on_device_removed(path);
+            }
         }
     }
 
     std::cout << "[ds4linux] Daemon shutting down\n";
     ::close(epfd);
+    udev_monitor_unref(udev_monitor);
+    udev_unref(udev);
     return EXIT_SUCCESS;
 }
