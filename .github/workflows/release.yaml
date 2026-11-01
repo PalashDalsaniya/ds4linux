@@ -21,7 +21,7 @@ jobs:
         # We install 'rpm' here so the Ubuntu runner's CPack knows how to generate Fedora packages!
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build build-essential libevdev-dev nlohmann-json3-dev rpm
+          sudo apt-get install -y cmake ninja-build build-essential libevdev-dev libudev-dev nlohmann-json3-dev rpm
 
       - name: Configure CMake
         # We inject your new ENABLE_PACKAGING flag here

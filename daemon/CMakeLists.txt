@@ -1,6 +1,7 @@
 # daemon/ — ds4linux backend daemon
 
 find_package(Libevdev REQUIRED)
+find_package(Libudev REQUIRED)
 
 add_executable(ds4linux-daemon
     src/main.cpp
@@ -16,6 +17,7 @@ target_include_directories(ds4linux-daemon PRIVATE
 target_link_libraries(ds4linux-daemon PRIVATE
     ds4linux::common
     Libevdev::Libevdev
+    Libudev::Libudev
 )
 
 target_compile_features(ds4linux-daemon PRIVATE cxx_std_20)

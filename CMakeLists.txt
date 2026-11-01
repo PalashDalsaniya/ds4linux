@@ -81,12 +81,12 @@ if(DS4LINUX_ENABLE_PACKAGING)
 
     # DEB specific settings (Ubuntu/Debian/Mint)
     set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "amd64")
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libevdev2")
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libevdev2, libudev1")
     set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${CMAKE_CURRENT_SOURCE_DIR}/scripts/postinst")
 
     # RPM specific settings (Fedora/Bazzite)
     set(CPACK_RPM_PACKAGE_ARCHITECTURE "x86_64")
-    set(CPACK_RPM_PACKAGE_REQUIRES "libevdev")
+    set(CPACK_RPM_PACKAGE_REQUIRES "libevdev, systemd-libs")
     set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${CMAKE_CURRENT_SOURCE_DIR}/scripts/postinst")
 
     include(CPack)

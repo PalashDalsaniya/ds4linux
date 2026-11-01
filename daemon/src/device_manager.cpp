@@ -545,7 +545,8 @@ static constexpr auto kProbeOutputGrace = std::chrono::seconds(2);
 
 // ── Translate loop ───────────────────────────────────────────────────────────
 
-void DeviceManager::translate_events() {
+std::vector<std::string> DeviceManager::translate_events() {
+    std::vector<std::string> disconnected;
     // The translation strategy for the UHID path:
     //   1. Read evdev events from the physical controller's gamepad, motion
     //      and touchpad nodes (in the order hid-playstation emits them).
@@ -585,6 +586,8 @@ void DeviceManager::translate_events() {
         );
         if (!ok) {
             std::cerr << "[ds4linux] Device disconnected: " << path << "\n";
+            disconnected.push_back(path);
+            continue;
         }
 
         // ── UHID output (rumble/LED from applications → physical) ───────
@@ -647,6 +650,7 @@ void DeviceManager::translate_events() {
             slot.virtual_dev->send_report(slot.ds4_state);
         }
     }
+    return disconnected;
 }
 
 // ── Profile ──────────────────────────────────────────────────────────────────
