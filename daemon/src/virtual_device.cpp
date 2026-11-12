@@ -242,7 +242,7 @@ VirtualDevice::VirtualDevice(const std::array<std::uint8_t, 6>& mac)
 
     auto& cr = ev.u.create2;
     std::strncpy(reinterpret_cast<char*>(cr.name),
-                 "Sony Computer Entertainment Wireless Controller",
+                 "Wireless Controller",  // as a real DS4 (and ViGEm's) reports it
                  sizeof(cr.name) - 1);
     std::strncpy(reinterpret_cast<char*>(cr.phys),
                  std::string(kVirtualDS4Phys).c_str(),
@@ -254,7 +254,7 @@ VirtualDevice::VirtualDevice(const std::array<std::uint8_t, 6>& mac)
     cr.bus     = BUS_USB;
     cr.vendor  = kVidSony;
     cr.product = kPidDS4v1;     // DS4 v1 (CUH-ZCT1x)
-    cr.version = 0x0111;        // v1.11 Gamepad
+    cr.version = 0x0100;        // bcdDevice of a real DS4 v1
     cr.country = 0;
 
     // Embed the HID report descriptor
@@ -466,6 +466,18 @@ static void parse_ds4_output(const std::uint8_t* d, std::size_t sz, const char* 
     }
 }
 
+/// " 05 ff 04 ..." (first 16 bytes) for debug logs.
+static std::string hex_bytes(const std::uint8_t* d, std::size_t n) {
+    std::string out;
+    char b[4];
+    for (std::size_t i = 0; i < std::min<std::size_t>(n, 16); ++i) {
+        std::snprintf(b, sizeof(b), " %02x", d[i]);
+        out += b;
+    }
+    if (n > 16) out += " ...";
+    return out;
+}
+
 /// Answer a GET_REPORT / SET_REPORT request.  The requester in the kernel
 /// blocks until the reply arrives, so retry briefly if the fd is full.
 static void write_reply(int fd, const uhid_event& reply, const char* what) {
@@ -505,6 +517,7 @@ void VirtualDevice::Impl::handle_events() {
             reply.u.get_report_reply.err = 0;
 
             std::uint8_t rnum = ev.u.get_report.rnum;
+            bool known = true;
 
             // MAC octets in report order (little-endian: last octet first)
             auto put_mac_le = [&](std::uint8_t* dst) {
@@ -531,14 +544,20 @@ void VirtualDevice::Impl::handle_events() {
                 break;
             }
             case 0xA3: {
-                // DS4 firmware info (49 bytes) — zeroed with report ID
-                std::uint8_t info[49]{};
-                info[0] = 0xA3;
-                // Byte 1-2: HW version
-                info[1] = 0x00; info[2] = 0x01;
-                // Reversed for Little-Endian parsing -> 30:0E:D5:89:8C:29
-                info[4] = 0x29; info[5] = 0x8C; info[6] = 0x89;
-                info[7] = 0xD5; info[8] = 0x0E; info[9] = 0x30;
+                // Firmware info (49 bytes), as a real DS4 answers it: the
+                // reference blob ViGEmBus uses for its virtual DS4 (build
+                // date "Aug  3 2013 07:01:12", LE16 hw version 0x3100 at byte
+                // 35, fw version 0x0049 at byte 41).  Programs that see
+                // zeroes here treat the pad as an unknown clone, and some
+                // games check hw version > 0x30FF (from PR #3).
+                static constexpr std::uint8_t info[49] = {
+                    0xA3, 0x41, 0x75, 0x67, 0x20, 0x20, 0x33, 0x20,
+                    0x32, 0x30, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x30, 0x37, 0x3A, 0x30, 0x31, 0x3A, 0x31,
+                    0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x01, 0x00, 0x31, 0x03, 0x00, 0x00,
+                    0x00, 0x49, 0x00, 0x05, 0x00, 0x00, 0x80, 0x03,
+                    0x00};
                 reply.u.get_report_reply.size = sizeof(info);
                 std::memcpy(reply.u.get_report_reply.data, info, sizeof(info));
                 break;
@@ -554,6 +573,7 @@ void VirtualDevice::Impl::handle_events() {
                 break;
             }
             default: {
+                known = false;
                 // Unknown report — return a minimal zeroed response with the ID.
                 // Determine expected size from the descriptor's report count.
                 // Fallback: 64 bytes (max common report size).
@@ -565,6 +585,12 @@ void VirtualDevice::Impl::handle_events() {
             }
             } // switch rnum
 
+            if (g_debug) {
+                std::fprintf(stderr, "[ds4linux] debug: app read feature report 0x%02x "
+                             "(type %u) -> %u bytes%s\n", rnum,
+                             unsigned(ev.u.get_report.rtype), unsigned(reply.u.get_report_reply.size),
+                             known ? "" : " (unknown report, answered with zeroes)");
+            }
             write_reply(fd, reply, "GET_REPORT");
             break;
         }
@@ -573,9 +599,18 @@ void VirtualDevice::Impl::handle_events() {
             // Feature or output report sent as a SET_REPORT request (e.g.
             // hidapi's hid_send_output_report / HIDIOCSOUTPUT).  Output
             // reports carry rumble / LED like UHID_OUTPUT; acknowledge all.
-            if (ev.u.set_report.rtype == UHID_OUTPUT_REPORT) {
-                parse_ds4_output(ev.u.set_report.data, ev.u.set_report.size,
-                                 "set_report", result);
+            const auto& sr = ev.u.set_report;
+            if (g_debug) {
+                std::fprintf(stderr, "[ds4linux] debug: app sent SET_REPORT 0x%02x (%s) %u bytes:%s\n",
+                             sr.rnum, sr.rtype == UHID_OUTPUT_REPORT ? "output"
+                                    : sr.rtype == UHID_FEATURE_REPORT ? "feature" : "input",
+                             unsigned(sr.size), hex_bytes(sr.data, sr.size).c_str());
+            }
+            // Effects are output reports, but accept the DS4 effects report
+            // IDs whatever type the program used
+            if (sr.rtype == UHID_OUTPUT_REPORT ||
+                (sr.size > 0 && (sr.data[0] == 0x05 || sr.data[0] == 0x11))) {
+                parse_ds4_output(sr.data, sr.size, "set_report", result);
             }
             struct uhid_event reply{};
             reply.type = UHID_SET_REPORT_REPLY;
@@ -586,13 +621,18 @@ void VirtualDevice::Impl::handle_events() {
         }
 
         case UHID_OPEN:
-            // A reader opened the hidraw node — no action needed.
-            break;
         case UHID_CLOSE:
-            // Reader closed — no action needed.
+            // First reader opened / last reader closed the device
+            if (g_debug) {
+                std::fprintf(stderr, "[ds4linux] debug: virtual DS4 %s\n",
+                             ev.type == UHID_OPEN ? "opened by a program" : "closed by all programs");
+            }
             break;
 
         default:
+            if (g_debug) {
+                std::fprintf(stderr, "[ds4linux] debug: unhandled UHID event %u\n", unsigned(ev.type));
+            }
             break;
         } // switch ev.type
     }
