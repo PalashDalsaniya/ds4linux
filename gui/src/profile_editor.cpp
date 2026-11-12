@@ -253,7 +253,7 @@ void ProfileEditor::showProfile(const Profile& p) {
     current_ = QString::fromStdString(p.name);
     title_->setText(current_);
     output_->setCurrentIndex(output_->findData(static_cast<int>(p.output_mode)));
-    lightbar_->setColor(QColor(p.lightbar_color.r, p.lightbar_color.g, p.lightbar_color.b));
+    lightbar_->setColor(toQColor(p.lightbar_color));
     rumble_->setValue(qRound(p.rumble_strength * 100.0));
     rumbleLbl_->setText(QString("%1%").arg(rumble_->value()));
     setDeadzone(leftStick_,  p.left_stick_dz);
@@ -278,9 +278,7 @@ Profile ProfileEditor::collect() const {
     Profile p;
     p.name        = current_.toStdString();
     p.output_mode = static_cast<OutputMode>(output_->currentData().toInt());
-    const QColor c = lightbar_->currentColor();
-    p.lightbar_color = {static_cast<std::uint8_t>(c.red()), static_cast<std::uint8_t>(c.green()),
-                        static_cast<std::uint8_t>(c.blue())};
+    p.lightbar_color = toLightbar(lightbar_->currentColor());
     p.rumble_strength  = rumble_->value() / 100.0;
     p.left_stick_dz    = getDeadzone(leftStick_);
     p.right_stick_dz   = getDeadzone(rightStick_);

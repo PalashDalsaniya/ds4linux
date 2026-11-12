@@ -2,14 +2,13 @@
 
 #include "ds4linux/profile_manager.h"
 #include "ds4linux/constants.h"
+#include "ds4linux/file_util.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 
 namespace fs = std::filesystem;
@@ -20,32 +19,6 @@ namespace ds4linux::daemon {
 // Clients reach the daemon over a world-writable socket; bound how many
 // files they can make it (root) write.
 static constexpr std::size_t kMaxProfiles = 256;
-
-static std::string read_file(const fs::path& path) {
-    std::ifstream ifs(path);
-    if (!ifs) throw std::runtime_error("Cannot read " + path.string());
-    std::stringstream ss;
-    ss << ifs.rdbuf();
-    return ss.str();
-}
-
-/// Write via a temporary file + rename so a crash never leaves half a file.
-static void write_file_atomic(const fs::path& path, const std::string& content) {
-    fs::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream ofs(tmp, std::ios::trunc);
-        if (!ofs) throw std::runtime_error("Cannot write " + tmp.string());
-        ofs << content;
-        if (!ofs.flush()) throw std::runtime_error("Cannot write " + tmp.string());
-    }
-    std::error_code ec;
-    fs::rename(tmp, path, ec);
-    if (ec) {
-        fs::remove(tmp, ec);
-        throw std::runtime_error("Cannot write " + path.string());
-    }
-}
 
 ProfileManager::ProfileManager(std::string state_dir)
     : profiles_dir_((fs::path(state_dir) / kProfilesDirName).string()),

@@ -130,8 +130,9 @@ void TesterPage::setDevices(const QJsonArray& devices) {
         selectionChanged();
     } else {
         updateInfo();
-        // Pick up edits to the profile (deadzones, lightbar) while visible
-        if (isVisible() || currentDevice().value("profile").toString() != oldProfile) loadProfile();
+        // A different profile was chosen.  (Edits to the same profile are
+        // made on the Profiles tab and picked up when this tab is shown.)
+        if (currentDevice().value("profile").toString() != oldProfile) loadProfile();
     }
 
     const bool any = !devices.isEmpty();
@@ -162,7 +163,7 @@ void TesterPage::updateInfo() {
                            "profile <b style='color:#dee0e6'>%3</b> &nbsp;·&nbsp; emulating %4</span>")
                        .arg(connectionLabel(d), battery,
                             d.value("profile").toString().toHtmlEscaped(),
-                            d.value("output_mode").toString() == "x360" ? "Xbox 360" : "DualShock 4"));
+                            outputModeLabel(d)));
 }
 
 void TesterPage::loadProfile() {
@@ -175,7 +176,7 @@ void TesterPage::loadProfile() {
         left_->setZone(p.left_stick_dz);
         right_->setZone(p.right_stick_dz);
         triggers_->setZones(p.left_trigger_dz, p.right_trigger_dz);
-        pad_->setLightbar(QColor(p.lightbar_color.r, p.lightbar_color.g, p.lightbar_color.b));
+        pad_->setLightbar(toQColor(p.lightbar_color));
     });
 }
 

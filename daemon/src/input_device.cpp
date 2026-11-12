@@ -104,7 +104,7 @@ struct InputDevice::Impl {
 
 // ── Construction ─────────────────────────────────────────────────────────────
 
-InputDevice::InputDevice(const std::string& evdev_path, bool grab_exclusive)
+InputDevice::InputDevice(const std::string& evdev_path)
     : impl_(std::make_unique<Impl>())
 {
     impl_->evdev_path_ = evdev_path;
@@ -136,19 +136,15 @@ InputDevice::InputDevice(const std::string& evdev_path, bool grab_exclusive)
                         : ConnectionType::USB;
 
     // Grab exclusive access so that the raw device doesn't also produce events
-    if (grab_exclusive) {
-        if (::ioctl(impl_->fd, EVIOCGRAB, 1) < 0) {
-            throw std::system_error(errno, std::system_category(),
-                                    "EVIOCGRAB failed for " + evdev_path);
-        }
-        impl_->grabbed = true;
+    if (::ioctl(impl_->fd, EVIOCGRAB, 1) < 0) {
+        throw std::system_error(errno, std::system_category(),
+                                "EVIOCGRAB failed for " + evdev_path);
     }
+    impl_->grabbed = true;
 
 }
 
 InputDevice::~InputDevice() = default;
-InputDevice::InputDevice(InputDevice&&) noexcept = default;
-InputDevice& InputDevice::operator=(InputDevice&&) noexcept = default;
 
 // ── Accessors ────────────────────────────────────────────────────────────────
 
@@ -164,7 +160,7 @@ ConnectionType  InputDevice::connection() const noexcept { return impl_->conn_; 
 
 // ── Event reading (hot path — keep lean) ─────────────────────────────────────
 
-bool InputDevice::read_events(const EventHandler& handler) {
+bool InputDevice::read_events(EventHandler handler) {
     struct input_event ev{};
     int rc = LIBEVDEV_READ_STATUS_SUCCESS;
 
@@ -189,7 +185,7 @@ bool InputDevice::read_events(const EventHandler& handler) {
     return true;
 }
 
-void InputDevice::replay_current_state(const EventHandler& handler) const {
+void InputDevice::replay_current_state(EventHandler handler) const {
     for (unsigned code = 0; code <= KEY_MAX; ++code) {
         if (libevdev_has_event_code(impl_->dev, EV_KEY, code)) {
             handler(EV_KEY, static_cast<std::uint16_t>(code),
@@ -216,12 +212,13 @@ bool InputDevice::ensure_hidraw() {
     return true;
 }
 
+std::string hid_sysfs_dir(const std::string& evdev_path) {
+    return "/sys/class/input/" + fs::path(evdev_path).filename().string() + "/device/device";
+}
+
 int InputDevice::open_hidraw() const {
-    // The hidraw node is a sibling of this evdev node under the same HID
-    // device: /sys/class/input/eventX/device/device/hidraw/hidrawN
-    auto event_name = fs::path(impl_->evdev_path_).filename();
-    fs::path dir = fs::path("/sys/class/input") / event_name /
-                   "device" / "device" / "hidraw";
+    // The hidraw node is a sibling of this evdev node under the same HID device
+    const fs::path dir = fs::path(hid_sysfs_dir(impl_->evdev_path_)) / "hidraw";
 
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator(dir, ec)) {
@@ -285,7 +282,6 @@ void InputDevice::detect_dualsense_vibration_mode() {
     // Original DualSense firmware only supports the classic rumble emulation;
     // "vibration v2" needs feature version 2.21+ (firmware info report 0x20,
     // LE16 update_version at offset 44).  The DualSense Edge always has it.
-    if (impl_->hidraw_fd_ < 0) return;
     std::uint8_t buf[64]{};
     buf[0] = 0x20;
     if (::ioctl(impl_->hidraw_fd_, HIDIOCGFEATURE(sizeof(buf)), buf) < 46) return;
@@ -365,51 +361,51 @@ bool InputDevice::send_ff_rumble(std::uint8_t heavy, std::uint8_t light) {
 
 bool InputDevice::set_lightbar(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
     if (impl_->model_ == ControllerModel::Generic) return false; // no lightbar
-    if (!ensure_hidraw()) return false;
-
-    if (impl_->model_ == ControllerModel::DualSense ||
-        impl_->model_ == ControllerModel::DualSenseEdge) {
-        auto& st = impl_->ds_out;
-        st.light_valid = true;
-        st.r = r;
-        st.g = g;
-        st.b = b;
-        return send_dualsense_output();
+    if (is_dualsense()) {
+        impl_->ds_out.light_valid = true;
+        impl_->ds_out.r = r;
+        impl_->ds_out.g = g;
+        impl_->ds_out.b = b;
     } else {
         impl_->ds4_out.r = r;
         impl_->ds4_out.g = g;
         impl_->ds4_out.b = b;
-        return send_ds4_output();
     }
+    return send_output();
 }
 
 bool InputDevice::set_rumble(std::uint8_t heavy, std::uint8_t light) {
     if (impl_->model_ == ControllerModel::Generic) {
         return send_ff_rumble(heavy, light);
     }
-    if (!ensure_hidraw()) return false;
-
-    if (impl_->model_ == ControllerModel::DualSense ||
-        impl_->model_ == ControllerModel::DualSenseEdge) {
-        auto& st = impl_->ds_out;
-        st.rumble_valid = true;
-        st.heavy = heavy;
-        st.light = light;
-        return send_dualsense_output();
+    if (is_dualsense()) {
+        impl_->ds_out.rumble_valid = true;
+        impl_->ds_out.heavy = heavy;
+        impl_->ds_out.light = light;
     } else {
         impl_->ds4_out.heavy = heavy;
         impl_->ds4_out.light = light;
-        return send_ds4_output();
     }
+    return send_output();
+}
+
+bool InputDevice::is_dualsense() const noexcept {
+    return impl_->model_ == ControllerModel::DualSense ||
+           impl_->model_ == ControllerModel::DualSenseEdge;
+}
+
+/// Send the stored rumble + lightbar state (they always go out together, so
+/// one update never resets the other).
+bool InputDevice::send_output() {
+    if (!ensure_hidraw()) return false;
+    return is_dualsense() ? send_dualsense_output() : send_ds4_output();
 }
 
 BatteryInfo InputDevice::battery() const {
     // The kernel registers the battery under this controller's HID device:
-    // /sys/class/input/eventX/device/device/power_supply/<name>/{capacity,status}
+    // <hid device>/power_supply/<name>/{capacity,status}
     BatteryInfo info;
-    auto event_name = fs::path(impl_->evdev_path_).filename();
-    fs::path supplies = fs::path("/sys/class/input") / event_name /
-                        "device" / "device" / "power_supply";
+    const fs::path supplies = fs::path(hid_sysfs_dir(impl_->evdev_path_)) / "power_supply";
 
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator(supplies, ec)) {

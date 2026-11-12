@@ -24,12 +24,11 @@ struct IpcServer::Impl {
     int listen_fd = -1;
     std::string socket_path;
 
-    // Per-client receive buffers (for framing partial reads)
-    std::unordered_map<int, std::vector<std::uint8_t>> client_buffers;
-    std::vector<int> client_fds;
+    // Connected clients and their receive buffers (for framing partial reads)
+    std::unordered_map<int, std::vector<std::uint8_t>> clients;
 
     ~Impl() {
-        for (int cfd : client_fds) {
+        for (const auto& [cfd, buf] : clients) {
             ::close(cfd);
         }
         if (listen_fd >= 0) {
@@ -86,14 +85,11 @@ int IpcServer::fd() const noexcept { return impl_->listen_fd; }
 int IpcServer::accept_client() {
     int cfd = ::accept4(impl_->listen_fd, nullptr, nullptr,
                         SOCK_NONBLOCK | SOCK_CLOEXEC);
-    if (cfd >= 0 && impl_->client_fds.size() >= kMaxClients) {
+    if (cfd >= 0 && impl_->clients.size() >= kMaxClients) {
         ::close(cfd);
         return -1;
     }
-    if (cfd >= 0) {
-        impl_->client_fds.push_back(cfd);
-        impl_->client_buffers[cfd] = {};
-    }
+    if (cfd >= 0) impl_->clients[cfd] = {};
     return cfd;
 }
 
@@ -102,7 +98,7 @@ bool IpcServer::read_client(int client_fd, const IpcMessageHandler& handler) {
     for (;;) {
         ssize_t n = ::recv(client_fd, tmp, sizeof(tmp), 0);
         if (n > 0) {
-            auto& buf = impl_->client_buffers[client_fd];
+            auto& buf = impl_->clients[client_fd];
             buf.insert(buf.end(), tmp, tmp + n);
 
             // Try to decode complete messages.  The socket is world-writable,
@@ -153,20 +149,18 @@ bool IpcServer::send(int client_fd, const std::string& json_payload) {
 }
 
 bool IpcServer::is_client(int fd) const {
-    const auto& v = impl_->client_fds;
-    return std::find(v.begin(), v.end(), fd) != v.end();
+    return impl_->clients.contains(fd);
 }
 
-const std::vector<int>& IpcServer::clients() const noexcept {
-    return impl_->client_fds;
+std::vector<int> IpcServer::clients() const {
+    std::vector<int> fds;
+    fds.reserve(impl_->clients.size());
+    for (const auto& [cfd, buf] : impl_->clients) fds.push_back(cfd);
+    return fds;
 }
 
 void IpcServer::disconnect(int client_fd) {
-    if (!is_client(client_fd)) return;
-    ::close(client_fd);
-    impl_->client_buffers.erase(client_fd);
-    auto& v = impl_->client_fds;
-    v.erase(std::remove(v.begin(), v.end(), client_fd), v.end());
+    if (impl_->clients.erase(client_fd)) ::close(client_fd);
 }
 
 } // namespace ds4linux::daemon

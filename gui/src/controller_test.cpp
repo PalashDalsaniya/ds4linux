@@ -179,6 +179,20 @@ QPainterPath triggerShape(bool left) {
     return t;
 }
 
+/// The fixed outlines, built once: the design space never changes.
+struct Artwork {
+    QPainterPath body     = bodyShape();
+    QPainterPath panel    = panelLines();
+    QPainterPath touchpad = touchpadShape();
+    QPainterPath bumper[2]  = {bumperShape(true), bumperShape(false)};
+    QPainterPath trigger[2] = {triggerShape(true), triggerShape(false)};
+};
+
+const Artwork& artwork() {
+    static const Artwork art;
+    return art;
+}
+
 /// A D-pad key: a rounded diamond at `offset` from the centre.
 QPainterPath dpadKey(QPointF centre, QPointF offset) {
     QPainterPath k;
@@ -218,7 +232,13 @@ ControllerView::ControllerView(QWidget* parent) : QWidget(parent) {
 }
 
 void ControllerView::setState(const QJsonObject& state) {
-    state_ = state;
+    // Motion data isn't drawn here and changes every frame: repaint only
+    // when something on the controller changed
+    QJsonObject drawn = state;
+    drawn.remove("gyro");
+    drawn.remove("accel");
+    if (drawn == state_) return;
+    state_ = std::move(drawn);
     update();
 }
 
@@ -250,6 +270,7 @@ void ControllerView::paintEvent(QPaintEvent*) {
     p.translate((width() - 1000 * scale) / 2, (height() - 830 * scale) / 2);
     p.scale(scale, scale);
 
+    const Artwork& art = artwork();
     const bool live = isEnabled() && !state_.isEmpty();
     auto on = [&](const char* name) { return live && pressed(state_, name); };
     const double lw = std::max(2.2, 1.6 / scale);   // at least ~1.6 px on screen
@@ -278,7 +299,7 @@ void ControllerView::paintEvent(QPaintEvent*) {
     valueFont.setPixelSize(22);
     valueFont.setBold(true);
     for (bool left : {true, false}) {
-        const QPainterPath t = triggerShape(left);
+        const QPainterPath& t = art.trigger[left ? 0 : 1];
         const int v = live ? state_.value(left ? "l2" : "r2").toInt() : 0;
         if (v > 0) {
             const QRectF r = t.boundingRect();
@@ -301,18 +322,18 @@ void ControllerView::paintEvent(QPaintEvent*) {
     }
 
     // ── Bumpers, body, centre panel ──────────────────────────────────────────
-    shape(bumperShape(true), on("l1"));
-    shape(bumperShape(false), on("r1"));
+    shape(art.bumper[0], on("l1"));
+    shape(art.bumper[1], on("r1"));
 
     p.setPen(line);
     p.setBrush(QColor(22, 24, 30));
-    p.drawPath(bodyShape());
+    p.drawPath(art.body);
     p.setPen(thin);
     p.setBrush(Qt::NoBrush);
-    p.drawPath(panelLines());
+    p.drawPath(art.panel);
 
     // ── Touchpad, lightbar, touches ──────────────────────────────────────────
-    const QPainterPath pad = touchpadShape();
+    const QPainterPath& pad = art.touchpad;
     shape(pad, on("touchpad"));
     if (on("touchpad")) {   // keep the touches readable on the filled pad
         p.setPen(Qt::NoPen);

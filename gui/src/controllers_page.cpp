@@ -149,9 +149,7 @@ void ControllersPage::populate(const QJsonArray& devices) {
         bar->setRange(0, 100);
         table_->setCellWidget(row, ColBattery, bar);
 
-        const auto mode = output_mode_from_string(d.value("output_mode").toString().toStdString());
-        table_->setItem(row, ColOutput, new QTableWidgetItem(
-            outputModeLabel(mode.value_or(OutputMode::DS4))));
+        table_->setItem(row, ColOutput, new QTableWidgetItem(outputModeLabel(d)));
 
         auto* combo = new QComboBox;
         combo->addItems(profiles_);

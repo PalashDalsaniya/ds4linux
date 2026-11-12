@@ -4,6 +4,7 @@
 // common/include/ds4linux/ipc_protocol.h).
 
 #include "ds4linux/constants.h"
+#include "ds4linux/file_util.h"
 #include "ds4linux/ipc_protocol.h"
 #include "ds4linux/profile.h"
 
@@ -260,14 +261,6 @@ json with_device(json req, const json& device) {
     return req;
 }
 
-std::string read_text_file(const std::string& path) {
-    std::ifstream ifs(path);
-    if (!ifs) throw std::runtime_error("Cannot read " + path);
-    std::stringstream ss;
-    ss << ifs.rdbuf();
-    return ss.str();
-}
-
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 void cmd_list(Client& c) {
@@ -405,7 +398,7 @@ void cmd_profile(Client& c, const std::vector<std::string>& a, const json& devic
         std::cout << "Removed remap of " << a[2] << " in \"" << a[1] << "\"\n";
     } else if (sub == "import") {
         need(1);
-        json p = json::parse(read_text_file(a[1]));
+        json p = json::parse(read_file(a[1]));
         c.request({{"type", "SaveProfile"}, {"profile", p}});
         std::cout << "Imported profile \"" << p.value("name", "") << "\"\n";
     } else if (sub == "export") {

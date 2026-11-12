@@ -3,6 +3,7 @@
 
 #include <ds4linux/profile.h>
 
+#include <QColor>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
@@ -25,6 +26,18 @@ inline QString connectionLabel(const QJsonObject& device) {
 /// Display name of an emulated controller type.
 inline QString outputModeLabel(OutputMode m) {
     return m == OutputMode::X360 ? "Xbox 360" : "DualShock 4";
+}
+
+/// Display name of a device's emulated controller ("output_mode" field).
+inline QString outputModeLabel(const QJsonObject& device) {
+    const auto mode = output_mode_from_string(device.value("output_mode").toString().toStdString());
+    return outputModeLabel(mode.value_or(OutputMode::DS4));
+}
+
+inline QColor toQColor(const LightbarColor& c) { return QColor(c.r, c.g, c.b); }
+inline LightbarColor toLightbar(const QColor& c) {
+    return {static_cast<std::uint8_t>(c.red()), static_cast<std::uint8_t>(c.green()),
+            static_cast<std::uint8_t>(c.blue())};
 }
 
 /// Profile <-> the JSON object the daemon sends and accepts, through the
