@@ -107,11 +107,12 @@ public:
     /// Handle a udev hotplug add event for an evdev path.
     void on_device_added(const std::string& evdev_path);
 
-    /// Handle a udev hotplug remove event.
+    /// Handle a udev hotplug remove event: closes the controller if it is a
+    /// gamepad node, or detaches it if it is a touchpad / motion node.
     void on_device_removed(const std::string& evdev_path);
 
-    /// Run one iteration of the translate loop for all slots.
-    /// Best called from an epoll wait.
+    /// Run one iteration of the translate loop for all slots.  Controllers
+    /// whose gamepad node fails (disconnected) are closed afterwards.
     void translate_events();
 
     /// Set profile on a slot (by evdev path): applies the lightbar colour and
@@ -152,8 +153,11 @@ private:
     void emit(ControllerSlot& slot);
     void apply_rumble(ControllerSlot& slot, std::chrono::steady_clock::time_point now);
     void create_output(ControllerSlot& slot, OutputMode mode);
+    void detach_touchpad(ControllerSlot& slot);
+    void detach_motion(ControllerSlot& slot);
     bool open_slot(const std::string& evdev_path, const std::string& physical_id);
     void close_slot(const std::string& evdev_path);
+    [[nodiscard]] bool is_open_node(const std::string& evdev_path) const;
     [[nodiscard]] bool generic_allowed(std::uint16_t vid, std::uint16_t pid) const;
     [[nodiscard]] std::array<std::uint8_t, 6>
     allocate_virtual_mac(const std::string& seed, const std::string& physical_uniq) const;

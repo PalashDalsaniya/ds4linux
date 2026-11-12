@@ -19,7 +19,7 @@ You control it with the `ds4linux-ctl` command or the `ds4linux-gui` app.
 
 - Arch Linux
 - `cmake`, `ninja`, `gcc`
-- `libevdev`
+- `libevdev`, `libudev`
 - `nlohmann-json`
 
 
@@ -66,7 +66,7 @@ The install script will:
 
 ```bash
 # Install dependencies
-sudo pacman -S --needed cmake ninja gcc libevdev nlohmann-json
+sudo pacman -S --needed cmake ninja gcc libevdev systemd nlohmann-json
 
 # Clone Repo
 git clone https://github.com/PalashDalsaniya/ds4linux.git
@@ -93,11 +93,11 @@ To also build the GUI (needs Qt 6: `sudo pacman -S qt6-base`), add `-DDS4LINUX_B
 
 ## Usage
 
-> **Important:** Connect your DualShock 4 or DualSense controller **before** starting the daemon. The daemon scans for controllers once at startup.
+Controllers can be connected before or after the daemon starts. The daemon monitors input hot-plug events and automatically opens supported controllers.
 
 ### 1. Connect your controller
 
-Connect your controller via **USB or Bluetooth**. The daemon must be started *after* the controller is connected, it only scans for devices once on launch.
+Connect your controller via **USB or Bluetooth**. ds4linux detects supported controllers while it is running.
 
 ### 2. Start the daemon
 
@@ -199,7 +199,7 @@ ds4linux/
 
 ## Troubleshooting
 
-- **Daemon doesn't detect controller:** Make sure the controller is connected (USB or Bluetooth) *before* starting the daemon.
+- **Daemon doesn't detect controller:** Confirm it is connected over USB or Bluetooth and that the daemon is running as root.
 - **Steam shows duplicate controllers:** Ensure the udev rules are installed (`/etc/udev/rules.d/99-ds4linux.rules`) and that Steam was launched *after* the daemon.
 - **Permission errors:** The daemon needs root. Run with `sudo`.
 - **`ds4linux-ctl` / the GUI can't connect:** The daemon isn't running (or was started with a different `--socket`). Start it with `sudo ds4linux-daemon` or `sudo systemctl start ds4linux`.

@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <libudev.h>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -69,6 +70,53 @@ static bool parse_id_list(const std::string& list,
     return !out.empty();
 }
 
+// ── Hotplug (udev monitor) ───────────────────────────────────────────────────
+
+/// Kernel-level "input" add / remove events, after udev has processed them
+/// (so device nodes exist and have their permissions).
+class HotplugMonitor {
+public:
+    HotplugMonitor() {
+        udev_ = udev_new();
+        if (!udev_) return;
+        mon_ = udev_monitor_new_from_netlink(udev_, "udev");
+        if (!mon_ ||
+            udev_monitor_filter_add_match_subsystem_devtype(mon_, "input", nullptr) < 0 ||
+            udev_monitor_enable_receiving(mon_) < 0) {
+            reset();
+        }
+    }
+    ~HotplugMonitor() { reset(); }
+    HotplugMonitor(const HotplugMonitor&) = delete;
+    HotplugMonitor& operator=(const HotplugMonitor&) = delete;
+
+    [[nodiscard]] int fd() const { return mon_ ? udev_monitor_get_fd(mon_) : -1; }
+
+    /// Drain pending events, passing (action, /dev/input/eventN) for evdev nodes.
+    template <typename F>
+    void drain(F&& on_event) {
+        if (!mon_) return;
+        while (struct udev_device* dev = udev_monitor_receive_device(mon_)) {
+            const char* action  = udev_device_get_action(dev);
+            const char* sysname = udev_device_get_sysname(dev);
+            if (action && sysname && std::strncmp(sysname, "event", 5) == 0) {
+                on_event(std::string(action), std::string("/dev/input/") + sysname);
+            }
+            udev_device_unref(dev);
+        }
+    }
+
+private:
+    void reset() {
+        if (mon_) udev_monitor_unref(mon_);
+        if (udev_) udev_unref(udev_);
+        mon_ = nullptr;
+        udev_ = nullptr;
+    }
+    struct udev*         udev_ = nullptr;
+    struct udev_monitor* mon_  = nullptr;
+};
+
 // ── Epoll set ────────────────────────────────────────────────────────────────
 // Rebuilt from scratch whenever the device fds change (controllers or virtual
 // outputs added / removed), which is rare and avoids stale registrations when
@@ -82,12 +130,13 @@ static void epoll_add(int epfd, int fd) {
     if (::epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) perror("epoll_ctl ADD");
 }
 
-static int build_epoll(const DeviceManager& devmgr, const IpcServer* ipc) {
+static int build_epoll(const DeviceManager& devmgr, const IpcServer* ipc, int hotplug_fd) {
     int epfd = ::epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) {
         perror("epoll_create1");
         return -1;
     }
+    if (hotplug_fd >= 0) epoll_add(epfd, hotplug_fd);
     for (int fd : devmgr.poll_fds()) epoll_add(epfd, fd);
     if (ipc) {
         epoll_add(epfd, ipc->fd());
@@ -147,6 +196,13 @@ int main(int argc, char** argv) {
     ::sigaction(SIGINT,  &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
 
+    // ── Hotplug monitor (before the first scan, so nothing is missed) ───────
+    HotplugMonitor hotplug;
+    if (hotplug.fd() < 0) {
+        std::cerr << "[ds4linux] udev monitor unavailable — controllers connected "
+                     "later need `ds4linux-ctl rescan`\n";
+    }
+
     // ── Profiles + device manager ────────────────────────────────────────────
     ProfileManager profiles(state_dir);
     DeviceManager devmgr(options);
@@ -156,8 +212,8 @@ int main(int argc, char** argv) {
     devmgr.scan();
 
     if (devmgr.slots().empty()) {
-        std::cerr << "[ds4linux] No controllers found. "
-                     "Make sure the daemon is running as root.\n";
+        std::cerr << "[ds4linux] No controllers found yet — waiting for one "
+                     "to be connected.\n";
     }
 
     // ── IPC (CLI / GUI control socket) ───────────────────────────────────────
@@ -179,7 +235,7 @@ int main(int argc, char** argv) {
     while (g_running) {
         if (epfd < 0 || devmgr.take_fds_changed()) {
             if (epfd >= 0) ::close(epfd);
-            epfd = build_epoll(devmgr, ipc.get());
+            epfd = build_epoll(devmgr, ipc.get(), hotplug.fd());
             if (epfd < 0) return EXIT_FAILURE;
         }
 
@@ -187,7 +243,12 @@ int main(int argc, char** argv) {
 
         for (int i = 0; i < nfds; ++i) {
             const int fd = events[i].data.fd;
-            if (ipc && fd == ipc->fd()) {
+            if (fd == hotplug.fd()) {
+                hotplug.drain([&](const std::string& action, const std::string& path) {
+                    if (action == "add") devmgr.on_device_added(path);
+                    else if (action == "remove") devmgr.on_device_removed(path);
+                });
+            } else if (ipc && fd == ipc->fd()) {
                 for (int client; (client = ipc->accept_client()) >= 0;) epoll_add(epfd, client);
             } else if (ipc && ipc->is_client(fd)) {
                 ipc->read_client(fd, [&](int client, const std::string& msg) {
