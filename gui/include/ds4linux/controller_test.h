@@ -36,9 +36,9 @@ public:
     void setState(const QJsonObject& state);
     void setModel(const QString& model);         // "DualSense", "DualShock 4 (v2)", ...
     void setLightbar(const QColor& color);
-    [[nodiscard]] QSize sizeHint() const override { return {660, 400}; }
+    [[nodiscard]] QSize sizeHint() const override { return {600, 480}; }
     [[nodiscard]] bool hasHeightForWidth() const override { return true; }
-    [[nodiscard]] int heightForWidth(int w) const override { return w * 6 / 10; }
+    [[nodiscard]] int heightForWidth(int w) const override { return w * 83 / 100; }
 
 protected:
     void paintEvent(QPaintEvent* event) override;

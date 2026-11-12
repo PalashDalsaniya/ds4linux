@@ -21,13 +21,13 @@ namespace {
 
 // ── Palette ──────────────────────────────────────────────────────────────────
 
-const QColor kPanel(30, 32, 38);
+const QColor kPanel(20, 22, 28);
 const QColor kPanelEdge(52, 55, 63);
 const QColor kBodyTop(62, 65, 74), kBodyBottom(40, 42, 49);
 const QColor kOutline(96, 100, 112);
 const QColor kIdle(74, 78, 89), kIdleDark(52, 55, 63);
-const QColor kRecess(24, 25, 30);
-const QColor kAccent(38, 150, 255);
+const QColor kRecess(13, 14, 18);
+const QColor kAccent(26, 159, 255);
 const QColor kText(222, 224, 230), kDim(140, 144, 154);
 const QColor kAxis[3] = {QColor(255, 99, 99), QColor(92, 214, 120), QColor(80, 160, 255)};
 
@@ -87,13 +87,24 @@ void push(std::deque<T>& d, const T& v, std::size_t max) {
     while (d.size() > max) d.pop_front();
 }
 
-// ── Controller body shape ────────────────────────────────────────────────────
-// Designed in a 1000 x 600 space; the left half is mirrored for the right.
+// ── Controller line art ──────────────────────────────────────────────────────
+// Drawn like Steam's controller test: light outlines on a dark background,
+// pressed controls fill with the accent colour.  Designed in a 1000 x 830
+// space; the body's top edge is at y = kTop, triggers and title above it.
+// The left half is mirrored for the right.
+
+constexpr double kTop = 160;
+const QColor kLine(214, 219, 228);          // outlines
+const QColor kLineDim(120, 126, 140);       // secondary lines
+const QColor kArtBg(15, 17, 22);
+
+QPointF at(double x, double y) { return {x, y + kTop}; }
 
 struct Seg { QPointF c1, c2, p; };
 
 QPointF mirror(QPointF pt) { return {1000 - pt.x(), pt.y()}; }
 
+/// Close a left-half outline (from top centre to bottom centre) with its mirror image.
 QPainterPath mirrored(QPointF start, const std::vector<Seg>& left) {
     QPainterPath path(start);
     std::vector<QPointF> ends{start};
@@ -108,44 +119,86 @@ QPainterPath mirrored(QPointF start, const std::vector<Seg>& left) {
     return path;
 }
 
+/// An open left-half line and its mirror image.
+QPainterPath symmetricLine(QPointF start, const std::vector<Seg>& segs) {
+    QPainterPath path(start);
+    for (const auto& s : segs) path.cubicTo(s.c1, s.c2, s.p);
+    QPainterPath right(mirror(start));
+    for (const auto& s : segs) right.cubicTo(mirror(s.c1), mirror(s.c2), mirror(s.p));
+    path.addPath(right);
+    return path;
+}
+
 QPainterPath bodyShape() {
-    return mirrored({500, 96}, {
-        {{440, 96}, {380, 94}, {330, 94}},      // top edge
-        {{262, 92}, {208, 98}, {172, 128}},     // shoulder
-        {{132, 162}, {106, 250}, {96, 330}},    // outer side
-        {{84, 430}, {96, 522}, {150, 550}},     // down the grip
-        {{196, 572}, {242, 548}, {264, 506}},   // grip end
-        {{292, 456}, {322, 404}, {372, 394}},   // inner side of the grip
-        {{420, 386}, {460, 386}, {500, 386}},   // belly
+    return mirrored(at(500, 0), {
+        {at(430, 0),   at(360, -2),  at(302, -2)},    // top edge
+        {at(252, -6),  at(200, -10), at(160, 12)},    // shoulder
+        {at(118, 36),  at(90, 110),  at(76, 190)},    // outer side
+        {at(60, 290),  at(40, 420),  at(46, 520)},    // grip, outside
+        {at(52, 612),  at(94, 662),  at(150, 650)},   // grip end
+        {at(206, 638), at(230, 580), at(254, 520)},   // grip, inside
+        {at(278, 462), at(302, 426), at(346, 414)},   // towards the middle
+        {at(402, 402), at(452, 398), at(500, 398)},   // bottom edge
     });
 }
 
-/// A D-pad arm pointing at the centre, rotated by `deg` (0 = up).
-QPainterPath dpadArm(QPointF c, double deg) {
-    QPainterPath arm;
-    arm.moveTo(-19, -62);
-    arm.lineTo(19, -62);
-    arm.lineTo(19, -24);
-    arm.lineTo(0, -6);
-    arm.lineTo(-19, -24);
-    arm.closeSubpath();
-    QTransform t;
-    t.translate(c.x(), c.y());
-    t.rotate(deg);
-    return t.map(arm);
+/// The edge of the centre panel: from the touchpad down into the grips.
+QPainterPath panelLines() {
+    return symmetricLine(at(302, 214), {
+        {at(270, 250), at(246, 300), at(250, 380)},
+        {at(252, 440), at(254, 480), at(254, 520)},   // meets the grip outline
+    });
 }
 
-void faceSymbol(QPainter& p, QPointF c, const char* name, QColor color) {
-    p.setPen(QPen(color, 3.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+QPainterPath touchpadShape() {
+    QPainterPath t(at(306, 4));
+    t.lineTo(at(694, 4));
+    t.cubicTo(at(700, 80), at(698, 150), at(690, 200));
+    t.cubicTo(at(620, 232), at(380, 232), at(310, 200));
+    t.cubicTo(at(302, 150), at(300, 80), at(306, 4));
+    t.closeSubpath();
+    return t;
+}
+
+QPainterPath bumperShape(bool left) {
+    QPainterPath b(at(298, -12));
+    b.cubicTo(at(252, -16), at(204, -20), at(166, 2));
+    b.cubicTo(at(150, -6), at(148, -20), at(160, -26));
+    b.cubicTo(at(200, -44), at(254, -42), at(300, -36));
+    b.cubicTo(at(310, -30), at(308, -16), at(298, -12));
+    b.closeSubpath();
+    if (left) return b;
+    QTransform flip(-1, 0, 0, 1, 1000, 0);
+    return flip.map(b);
+}
+
+QPainterPath triggerShape(bool left) {
+    QPainterPath t;
+    const QRectF r = left ? QRectF(186, kTop - 118, 104, 62) : QRectF(710, kTop - 118, 104, 62);
+    t.addRoundedRect(r, 24, 24);
+    return t;
+}
+
+/// A D-pad key: a rounded diamond at `offset` from the centre.
+QPainterPath dpadKey(QPointF centre, QPointF offset) {
+    QPainterPath k;
+    k.addRoundedRect(QRectF(-21, -21, 42, 42), 9, 9);
+    QTransform t;
+    t.translate(centre.x() + offset.x(), centre.y() + offset.y());
+    t.rotate(45);
+    return t.map(k);
+}
+
+void faceSymbol(QPainter& p, QPointF c, std::string_view name, QColor color) {
+    p.setPen(QPen(color, 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.setBrush(Qt::NoBrush);
-    const double s = 10;
-    if (std::string_view(name) == "triangle") {
-        QPolygonF tri{{c.x(), c.y() - s - 1}, {c.x() + s + 1, c.y() + s * 0.75},
-                      {c.x() - s - 1, c.y() + s * 0.75}};
-        p.drawPolygon(tri);
-    } else if (std::string_view(name) == "circle") {
+    const double s = 11;
+    if (name == "triangle") {
+        p.drawPolygon(QPolygonF{{c.x(), c.y() - s - 1}, {c.x() + s + 1, c.y() + s * 0.75},
+                                {c.x() - s - 1, c.y() + s * 0.75}});
+    } else if (name == "circle") {
         p.drawEllipse(c, s, s);
-    } else if (std::string_view(name) == "cross") {
+    } else if (name == "cross") {
         p.drawLine(c + QPointF(-s, -s), c + QPointF(s, s));
         p.drawLine(c + QPointF(-s, s), c + QPointF(s, -s));
     } else {
@@ -206,210 +259,207 @@ void ControllerView::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    const double scale = std::min(width() / 1000.0, height() / 600.0);
-    p.translate((width() - 1000 * scale) / 2, (height() - 600 * scale) / 2);
+    // Dark card behind the drawing
+    p.setPen(QPen(kPanelEdge, 1));
+    p.setBrush(kArtBg);
+    p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12);
+
+    const double scale = std::min(width() / 1000.0, height() / 830.0);
+    p.translate((width() - 1000 * scale) / 2, (height() - 830 * scale) / 2);
     p.scale(scale, scale);
 
     const bool live = isEnabled() && !state_.isEmpty();
     auto on = [&](const char* name) { return live && pressed(state_, name); };
-    QFont label;
-    label.setPixelSize(15);
-    label.setBold(true);
+    const double lw = std::max(2.2, 1.6 / scale);   // at least ~1.6 px on screen
+    const QPen line(kLine, lw, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    const QPen thin(kLineDim, lw * 0.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    const QColor pressFill = kAccent;
 
-    // ── Triggers (furthest back) and bumpers ─────────────────────────────────
-    auto trigger = [&](bool left) {
-        // The bumper covers the trigger's lower end; fill the visible part
-        const QRectF r = left ? QRectF(196, 0, 128, 92) : QRectF(676, 0, 128, 92);
-        const QRectF visible = r.adjusted(0, 0, 0, -20);
+    // Outline a shape; pressed shapes glow and fill with the accent colour
+    auto shape = [&](const QPainterPath& path, bool down) {
+        if (down) glow(p, path.boundingRect().center(),
+                       0.7 * std::max(path.boundingRect().width(), path.boundingRect().height()), kAccent);
+        p.setPen(down ? QPen(kAccent.lighter(150), lw) : line);
+        p.setBrush(down ? QBrush(pressFill) : Qt::NoBrush);
+        p.drawPath(path);
+    };
+
+    QFont titleFont;
+    titleFont.setPixelSize(30);
+    p.setFont(titleFont);
+    p.setPen(kText);
+    p.drawText(QRectF(200, 0, 600, 40), Qt::AlignCenter,
+               dualsense_ ? "DualSense Wireless Controller" : "DUALSHOCK 4 Wireless Controller");
+
+    // ── Triggers: fill as they are pulled, value inside ──────────────────────
+    QFont valueFont;
+    valueFont.setPixelSize(22);
+    valueFont.setBold(true);
+    for (bool left : {true, false}) {
+        const QPainterPath t = triggerShape(left);
         const int v = live ? state_.value(left ? "l2" : "r2").toInt() : 0;
-        QPainterPath shape;
-        shape.addRoundedRect(r, 22, 22);
-        p.setPen(QPen(v > 0 ? kAccent.lighter(130) : kOutline, 2));
-        p.setBrush(kIdleDark);
-        p.drawPath(shape);
         if (v > 0) {
-            p.save();
-            p.setClipPath(shape);
+            const QRectF r = t.boundingRect();
             QRectF fill = r;
-            fill.setTop(visible.bottom() - visible.height() * v / 255.0);
-            QLinearGradient g(fill.topLeft(), fill.bottomLeft());
-            g.setColorAt(0, kAccent.lighter(130));
-            g.setColorAt(1, kAccent);
-            p.fillRect(fill, g);
+            fill.setTop(r.bottom() - r.height() * v / 255.0);
+            p.save();
+            p.setClipPath(t);
+            QColor c = kAccent;
+            c.setAlpha(110 + v * 145 / 255);
+            p.fillRect(fill, c);
             p.restore();
         }
-        p.setFont(label);
+        p.setPen(v > 0 ? QPen(kAccent.lighter(150), lw) : line);
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(t);
+        p.setFont(valueFont);
         p.setPen(kText);
-        p.drawText(visible, Qt::AlignCenter, QString("%1  %2").arg(left ? "L2" : "R2").arg(v));
-    };
-    trigger(true);
-    trigger(false);
-
-    auto bumper = [&](bool left) {
-        const QRectF r = left ? QRectF(182, 72, 150, 34) : QRectF(668, 72, 150, 34);
-        const bool down = on(left ? "l1" : "r1");
-        p.setPen(QPen(down ? kAccent.lighter(140) : kOutline, 2));
-        p.setBrush(down ? kAccent : kIdle);
-        p.drawRoundedRect(r, 15, 15);
-        p.setFont(label);
-        p.setPen(kText);
-        p.drawText(r.adjusted(0, -8, 0, 0), Qt::AlignCenter, left ? "L1" : "R1");
-    };
-    bumper(true);
-    bumper(false);
-
-    // ── Body ─────────────────────────────────────────────────────────────────
-    const QPainterPath body = bodyShape();
-    QLinearGradient bodyFill(0, 90, 0, 560);
-    bodyFill.setColorAt(0, kBodyTop);
-    bodyFill.setColorAt(1, kBodyBottom);
-    p.setPen(QPen(kOutline, 2.5));
-    p.setBrush(bodyFill);
-    p.drawPath(body);
-
-    // ── Touchpad and lightbar ────────────────────────────────────────────────
-    const QRectF pad(362, 104, 276, 150);
-    const bool padClick = on("touchpad");
-    if (padClick) glow(p, pad.center(), 170, kAccent);
-    QLinearGradient padFill(pad.topLeft(), pad.bottomLeft());
-    padFill.setColorAt(0, QColor(50, 53, 61));
-    padFill.setColorAt(1, QColor(40, 42, 49));
-    p.setPen(QPen(padClick ? kAccent : kOutline, padClick ? 3 : 2));
-    p.setBrush(padFill);
-    p.drawRoundedRect(pad, 20, 20);
-
-    QColor bar = lightbar_;
-    if (!live) bar = bar.darker(250);
-    p.setPen(Qt::NoPen);
-    if (dualsense_) {
-        // Light strips along both sides of the touchpad
-        for (double x : {348.0, 646.0}) {
-            glow(p, QPointF(x + 3, 180), 34, bar);
-            p.setBrush(bar);
-            p.drawRoundedRect(QRectF(x, 118, 6, 122), 3, 3);
-        }
-    } else {
-        glow(p, QPointF(500, 92), 60, bar);
-        p.setBrush(bar);
-        p.drawRoundedRect(QRectF(392, 88, 216, 8), 4, 4);
+        p.drawText(t.boundingRect(), Qt::AlignCenter,
+                   QString("%1  %2").arg(left ? "L2" : "R2").arg(v));
     }
 
-    // Finger positions on the touchpad
+    // ── Bumpers, body, centre panel ──────────────────────────────────────────
+    shape(bumperShape(true), on("l1"));
+    shape(bumperShape(false), on("r1"));
+
+    p.setPen(line);
+    p.setBrush(QColor(22, 24, 30));
+    p.drawPath(bodyShape());
+    p.setPen(thin);
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(panelLines());
+
+    // ── Touchpad, lightbar, touches ──────────────────────────────────────────
+    const QPainterPath pad = touchpadShape();
+    shape(pad, on("touchpad"));
+    if (on("touchpad")) {   // keep the touches readable on the filled pad
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(22, 24, 30, 150));
+        p.drawPath(pad);
+    }
+
+    QColor bar = lightbar_;
+    if (!live) bar = bar.darker(260);
+    QPen barPen(bar, 7, Qt::SolidLine, Qt::RoundCap);
+    if (dualsense_) {
+        // Light strips along both sides of the touchpad
+        for (bool left : {true, false}) {
+            QPainterPath strip(at(left ? 290 : 710, 30));
+            strip.cubicTo(at(left ? 286 : 714, 90), at(left ? 288 : 712, 150), at(left ? 296 : 704, 196));
+            QColor halo = bar;
+            halo.setAlpha(70);
+            p.setPen(QPen(halo, 20, Qt::SolidLine, Qt::RoundCap));
+            p.drawPath(strip);
+            p.setPen(barPen);
+            p.drawPath(strip);
+        }
+    } else {
+        QColor halo = bar;
+        halo.setAlpha(70);
+        p.setPen(QPen(halo, 20, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(at(370, -14), at(630, -14));
+        p.setPen(barPen);
+        p.drawLine(at(370, -14), at(630, -14));
+    }
+
+    const QRectF padBox = pad.boundingRect().adjusted(16, 14, -16, -26);
     const auto touches = state_.value("touches").toArray();
     for (int i = 0; live && i < touches.size(); ++i) {
         const auto t = touches[i].toObject();
         if (!t.value("active").toBool()) continue;
-        const QPointF pt(pad.left() + 10 + (pad.width() - 20) * t.value("x").toInt() / double(kDS4TouchpadMaxX),
-                         pad.top() + 10 + (pad.height() - 20) * t.value("y").toInt() / double(kDS4TouchpadMaxY));
+        const QPointF pt(padBox.left() + padBox.width() * t.value("x").toInt() / double(kDS4TouchpadMaxX),
+                         padBox.top() + padBox.height() * t.value("y").toInt() / double(kDS4TouchpadMaxY));
         const QColor c = i == 0 ? QColor(255, 176, 50) : QColor(60, 220, 150);
-        glow(p, pt, 26, c);
+        glow(p, pt, 30, c);
+        p.setPen(Qt::NoPen);
         p.setBrush(c);
-        p.drawEllipse(pt, 9, 9);
+        p.drawEllipse(pt, 11, 11);
     }
 
-    // ── Share / Create and Options ───────────────────────────────────────────
-    auto smallButton = [&](QPointF c, bool down, const QString& text) {
-        if (down) glow(p, c, 34, kAccent);
-        p.setPen(QPen(down ? kAccent.lighter(140) : kOutline, 1.5));
-        p.setBrush(down ? kAccent : kIdle);
-        p.drawRoundedRect(QRectF(c.x() - 9, c.y() - 17, 18, 34), 9, 9);
-        QFont f;
-        f.setPixelSize(11);
-        p.setFont(f);
-        p.setPen(kDim);
-        p.drawText(QRectF(c.x() - 50, c.y() - 42, 100, 20), Qt::AlignCenter, text);
-    };
-    smallButton({322, 140}, on("share"), dualsense_ ? "CREATE" : "SHARE");
-    smallButton({678, 140}, on("options"), "OPTIONS");
+    // ── Create / Share and Options ───────────────────────────────────────────
+    for (bool left : {true, false}) {
+        QPainterPath b;
+        b.addRoundedRect(QRectF(left ? 258 : 726, kTop + 30, 16, 46), 8, 8);
+        shape(b, on(left ? "share" : "options"));
+    }
 
-    // ── D-pad ────────────────────────────────────────────────────────────────
-    const QPointF dc(232, 222);
-    p.setPen(Qt::NoPen);
-    p.setBrush(kRecess);
-    p.drawEllipse(dc, 78, 78);
-    const struct { const char* name; double deg; } arms[] = {
-        {"dpad_up", 0}, {"dpad_right", 90}, {"dpad_down", 180}, {"dpad_left", 270}};
-    for (const auto& a : arms) {
-        const bool down = on(a.name);
-        const QPainterPath arm = dpadArm(dc, a.deg);
-        if (down) glow(p, arm.boundingRect().center(), 46, kAccent);
-        p.setPen(QPen(down ? kAccent.lighter(140) : kOutline, 1.5));
-        p.setBrush(down ? kAccent : kIdle);
-        p.drawPath(arm);
+    // ── D-pad: four diamond keys with arrows ─────────────────────────────────
+    const QPointF dc = at(184, 150);
+    const struct { const char* name; QPointF dir; } keys[] = {
+        {"dpad_up", {0, -1}}, {"dpad_right", {1, 0}}, {"dpad_down", {0, 1}}, {"dpad_left", {-1, 0}}};
+    for (const auto& k : keys) {
+        const bool down = on(k.name);
+        shape(dpadKey(dc, k.dir * 44), down);
+        // Arrow pointing outwards
+        const QPointF tip = dc + k.dir * 56, base = dc + k.dir * 40;
+        const QPointF side(-k.dir.y() * 8, k.dir.x() * 8);
+        p.setPen(Qt::NoPen);
+        p.setBrush(down ? QColor(15, 17, 22) : kLine);
+        p.drawPolygon(QPolygonF{tip, base + side, base - side});
     }
 
     // ── Face buttons ─────────────────────────────────────────────────────────
-    const QPointF fc(768, 222);
-    p.setPen(Qt::NoPen);
-    p.setBrush(kRecess);
-    p.drawEllipse(fc, 92, 92);
+    const QPointF fc = at(816, 150);
     const struct { const char* name; QPointF off; QColor color; } faces[] = {
-        {"triangle", {0, -52}, kTriangle}, {"circle", {52, 0}, kCircle},
-        {"cross",    {0, 52},  kCross},    {"square", {-52, 0}, kSquare}};
+        {"triangle", {0, -58}, kTriangle}, {"circle", {58, 0}, kCircle},
+        {"cross",    {0, 58},  kCross},    {"square", {-58, 0}, kSquare}};
     for (const auto& f : faces) {
         const QPointF c = fc + f.off;
         const bool down = on(f.name);
-        if (down) glow(p, c, 48, f.color);
-        p.setPen(QPen(down ? f.color.lighter(130) : kOutline, 1.5));
-        p.setBrush(down ? f.color : kIdle);
-        p.drawEllipse(c, 27, 27);
-        faceSymbol(p, c, f.name, down ? QColor(20, 20, 24) : f.color);
+        if (down) glow(p, c, 58, f.color);
+        p.setPen(down ? QPen(f.color.lighter(130), lw) : line);
+        p.setBrush(down ? QBrush(f.color) : Qt::NoBrush);
+        p.drawEllipse(c, 30, 30);
+        faceSymbol(p, c, f.name, down ? QColor(15, 17, 22) : kLine);
     }
 
-    // ── Speaker grille, PS button ────────────────────────────────────────────
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(28, 29, 34));
-    for (int row = 0; row < 3; ++row) {
-        for (int col = -4 + row % 2; col <= 4; col += 2) {
-            p.drawEllipse(QPointF(500 + col * 9, 276 + row * 8), 2.2, 2.2);
+    // ── Speaker, PS and mute buttons ─────────────────────────────────────────
+    p.setPen(QPen(kLineDim, lw * 0.7));
+    p.setBrush(Qt::NoBrush);
+    for (int row = 0; row < 2; ++row) {
+        const int n = row == 0 ? 5 : 4;
+        for (int i = 0; i < n; ++i) {
+            p.drawEllipse(at(500 + (i - (n - 1) / 2.0) * 17, 248 + row * 15), 5, 5);
         }
     }
-    const QPointF ps(500, 336);
-    const bool psDown = on("ps");
-    if (psDown) glow(p, ps, 44, kAccent);
-    p.setPen(QPen(psDown ? kAccent.lighter(140) : kOutline, 1.5));
-    p.setBrush(psDown ? kAccent : kIdle);
-    p.drawEllipse(ps, 20, 20);
+    QPainterPath ps;
+    ps.addEllipse(at(500, 314), 26, 26);
+    shape(ps, on("ps"));
     QFont psFont;
-    psFont.setPixelSize(14);
+    psFont.setPixelSize(20);
     psFont.setBold(true);
     p.setFont(psFont);
-    p.setPen(psDown ? QColor(20, 20, 24) : kText);
-    p.drawText(QRectF(ps.x() - 20, ps.y() - 20, 40, 40), Qt::AlignCenter, "PS");
+    p.setPen(on("ps") ? QColor(15, 17, 22) : kLine);
+    p.drawText(QRectF(474, kTop + 288, 52, 52), Qt::AlignCenter, "PS");
+    if (dualsense_) {
+        QPainterPath mute;
+        mute.addRoundedRect(QRectF(478, kTop + 360, 44, 12), 6, 6);
+        shape(mute, false);
+    }
 
-    // ── Sticks ───────────────────────────────────────────────────────────────
+    // ── Sticks: base ring, cap that moves, lights on L3 / R3 ─────────────────
     auto stick = [&](QPointF c, const char* xk, const char* yk, const char* click) {
         const double x = live ? axis(state_, xk) : 0, y = live ? axis(state_, yk) : 0;
         const bool down = on(click);
-        // Well
-        QRadialGradient well(c, 64);
-        well.setColorAt(0.0, QColor(18, 19, 23));
-        well.setColorAt(1.0, QColor(34, 36, 42));
-        p.setPen(QPen(kOutline, 2));
-        p.setBrush(well);
-        p.drawEllipse(c, 62, 62);
-        // Cap, displaced by the deflection
-        const QPointF cap = c + QPointF(x, y) * 22;
-        if (down) glow(p, cap, 70, kAccent);
-        QRadialGradient capFill(cap - QPointF(10, 12), 52);
-        capFill.setColorAt(0.0, down ? kAccent.lighter(130) : QColor(96, 100, 112));
-        capFill.setColorAt(1.0, down ? kAccent.darker(130) : QColor(58, 61, 70));
-        p.setPen(QPen(down ? kAccent.lighter(150) : QColor(110, 114, 126), 2));
-        p.setBrush(capFill);
-        p.drawEllipse(cap, 42, 42);
-        // Concave top and grip ring
-        p.setPen(QPen(QColor(0, 0, 0, 70), 4));
+        p.setPen(thin);
         p.setBrush(Qt::NoBrush);
-        p.drawEllipse(cap, 30, 30);
-        // Direction marker
+        p.drawEllipse(c, 60, 60);
+        const QPointF cap = c + QPointF(x, y) * 20;
+        if (down) glow(p, cap, 80, kAccent);
+        p.setPen(down ? QPen(kAccent.lighter(150), lw) : line);
+        p.setBrush(down ? QBrush(kAccent) : QBrush(kArtBg));
+        p.drawEllipse(cap, 44, 44);
+        p.setPen(down ? QPen(QColor(15, 17, 22), lw) : line);
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(cap, 31, 31);
         if (std::hypot(x, y) > 0.05) {
             p.setPen(Qt::NoPen);
-            p.setBrush(kAccent.lighter(down ? 170 : 120));
-            p.drawEllipse(cap + QPointF(x, y) * 26, 5, 5);
+            p.setBrush(down ? QColor(15, 17, 22) : kAccent);
+            p.drawEllipse(cap + QPointF(x, y) * 30, 6, 6);
         }
     };
-    stick({366, 342}, "lx", "ly", "l3");
-    stick({634, 342}, "rx", "ry", "r3");
+    stick(at(334, 314), "lx", "ly", "l3");
+    stick(at(666, 314), "rx", "ry", "r3");
 }
 
 // ── StickPanel ───────────────────────────────────────────────────────────────
