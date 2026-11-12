@@ -14,6 +14,7 @@ add_executable(ds4linux-gui
     src/led_picker.cpp
     src/profile_editor.cpp
     src/tester_page.cpp
+    src/controller_test.cpp
     # Headers with Q_OBJECT — must be listed for AUTOMOC
     include/ds4linux/main_window.h
     include/ds4linux/daemon_control.h

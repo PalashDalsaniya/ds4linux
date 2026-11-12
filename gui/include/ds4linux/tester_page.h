@@ -1,5 +1,5 @@
 #pragma once
-// ds4linux GUI — Controller tester: live view of a controller's input
+// ds4linux GUI — Controller test: live view of a controller's input
 
 #include <QJsonArray>
 #include <QJsonObject>
@@ -12,22 +12,12 @@ class QTimer;
 
 namespace ds4linux::gui {
 
+class ControllerView;
 class IpcClient;
-
-/// Paints a DS4-style controller from an input state object.
-class ControllerView : public QWidget {
-    Q_OBJECT
-public:
-    explicit ControllerView(QWidget* parent = nullptr);
-    void setState(const QJsonObject& state);
-    [[nodiscard]] QSize sizeHint() const override { return {640, 380}; }
-
-protected:
-    void paintEvent(QPaintEvent* event) override;
-
-private:
-    QJsonObject state_;
-};
+class MotionPanel;
+class StickPanel;
+class TouchpadPanel;
+class TriggerPanel;
 
 class TesterPage : public QWidget {
     Q_OBJECT
@@ -43,15 +33,27 @@ protected:
 
 private:
     void poll();
+    void selectionChanged();
+    void updateInfo();
+    void loadProfile();
+    void clearView();
+    [[nodiscard]] QJsonObject currentDevice() const;
 
-    IpcClient*      ipc_     = nullptr;
-    QComboBox*      device_  = nullptr;
-    QButtonGroup*   view_    = nullptr;   // 0 = input, 1 = output
-    ControllerView* pad_     = nullptr;
-    QLabel*         motion_  = nullptr;
-    QLabel*         hint_    = nullptr;
-    QTimer*         timer_   = nullptr;
-    bool            waiting_ = false;
+    IpcClient*      ipc_      = nullptr;
+    QComboBox*      device_   = nullptr;
+    QLabel*         info_     = nullptr;
+    QButtonGroup*   view_     = nullptr;   // 0 = input, 1 = output
+    ControllerView* pad_      = nullptr;
+    StickPanel*     left_     = nullptr;
+    StickPanel*     right_    = nullptr;
+    TriggerPanel*   triggers_ = nullptr;
+    TouchpadPanel*  touch_    = nullptr;
+    MotionPanel*    motion_   = nullptr;
+    QWidget*        body_     = nullptr;
+    QLabel*         hint_     = nullptr;
+    QTimer*         timer_    = nullptr;
+    QJsonArray      devices_;
+    bool            waiting_  = false;
 };
 
 } // namespace ds4linux::gui

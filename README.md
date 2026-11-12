@@ -57,6 +57,7 @@ ds4linux-ctl -d 1 profile use Racing
 | ---- | ------ |
 | Hades | ✅ Works |
 | The Stanley Parable: Ultra Deluxe | ✅ Works |
+| Yakuza 0 | ✅ Works |
 
 ### Not Working
 
@@ -67,18 +68,3 @@ ds4linux-ctl -d 1 profile use Racing
 If a game doesn't work with ds4linux, you can try [SenseShock](https://github.com/muhammad23012009/senseshock) as an alternative.
 
 If you have tested ds4linux with a game, please let me know so I can add it to this list! You can contact me on Discord: **palashd**
-
-# Roadmap
-
-- [x] Fix rumble functionality
-- [x] Resurrect GUI development
-- [x] take input from xbox or generic controller and translate to dualshock (`--generic`)
-- [ ] Add input support for standard Xbox, Nintendo Switch Pro, Dualshock 3, and Generic controllers (auto detected)
-- [x] Add Xbox 360 controller emulation
-- [x] have option to switch and choose between virtual ds4 or xbox360
-- [x] Add Visual Controller Tester
-- [x] options to control everything without GUI using CLI
-- [x] custom lightbar colors on supported controllers
-- [x] Custom settings profiles
-- [x] button remapping
-- [ ] Emulate Dualsense so it can connect it by bluetooth and have functional adaptive triggers (for games that only support it on usb)
