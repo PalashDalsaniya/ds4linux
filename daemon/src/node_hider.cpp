@@ -9,7 +9,7 @@
 #include <iostream>
 #include <map>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
+#include <spawn.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -33,14 +33,16 @@ static std::map<std::string, int>& hidden_devices() {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+extern "C" char** environ;
+
 /// Run a command and wait for it.  Returns false if it couldn't run or failed.
+/// (posix_spawn: safe in this multi-threaded process, and no fork copy.)
 static bool run(std::vector<const char*> argv) {
     argv.push_back(nullptr);
-    const pid_t pid = ::fork();
-    if (pid < 0) return false;
-    if (pid == 0) {
-        ::execvp(argv[0], const_cast<char* const*>(argv.data()));
-        ::_exit(127);
+    pid_t pid = 0;
+    if (::posix_spawnp(&pid, argv[0], nullptr, nullptr,
+                       const_cast<char* const*>(argv.data()), environ) != 0) {
+        return false;
     }
     int status = 0;
     while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
@@ -62,6 +64,7 @@ static void write_rules() {
             out << "# Written by ds4linux-daemon: controllers it is using right now.\n"
                    "# Removed when it releases them (or stops).\n";
             for (const auto& [sysfs, n] : devices) {
+                // hide() only accepts paths without glob / list characters
                 // DEVPATH is the sysfs path without the "/sys" prefix
                 out << "SUBSYSTEM==\"input|hidraw\", DEVPATH==\"" << sysfs.substr(4)
                     << "/*\", MODE:=\"0600\", TAG-=\"uaccess\"\n";
@@ -73,46 +76,50 @@ static void write_rules() {
                       << ec.message() << "\n";
         }
     }
-    if (!run({"udevadm", "control", "--reload"})) {
+    // Bounded: this runs on the event loop, and a busy udevd must not
+    // freeze every controller for the default 60 s
+    if (!run({"udevadm", "control", "--timeout=5", "--reload"})) {
         std::cerr << "[ds4linux] `udevadm control --reload` failed; the physical "
                      "controller may stay visible to other programs\n";
     }
 }
 
-/// Device nodes (/dev/...) below a sysfs device: its evdev and hidraw nodes.
-static std::vector<std::string> device_nodes(const std::string& sysfs) {
-    std::vector<std::string> nodes;
+/// A device below the controller that has a device node.
+struct Node {
+    fs::path    sysfs;    // its sysfs directory
+    std::string devnode;  // /dev/...
+};
+
+/// Every device node below a sysfs device: evdev, joydev (jsN), hidraw ...
+static std::vector<Node> device_nodes(const std::string& sysfs) {
+    std::vector<Node> nodes;
     std::error_code ec;
     fs::recursive_directory_iterator it(sysfs, ec), end;
     for (; !ec && it != end; it.increment(ec)) {
-        const auto name = it->path().filename().string();
         if (it.depth() > 3) {  // hidraw/hidrawN, input/inputN/eventN are shallow
             it.disable_recursion_pending();
             continue;
         }
-        if (it->is_symlink(ec)) {  // subsystem, device, driver ... links
-            it.disable_recursion_pending();
-            continue;
-        }
-        if (name.starts_with("event") || name.starts_with("hidraw")) {
-            if (fs::exists(it->path() / "dev")) nodes.push_back("/dev/" +
-                (name.starts_with("event") ? "input/" + name : name));
+        if (it->path().filename() != "uevent") continue;
+        std::ifstream in(it->path());
+        for (std::string line; std::getline(in, line);) {
+            if (line.starts_with("DEVNAME=")) {
+                nodes.push_back({it->path().parent_path(), "/dev/" + line.substr(8)});
+                break;
+            }
         }
     }
     return nodes;
 }
 
-/// Ask udev to re-process a device node with the current rules.
-static void trigger_change(const std::string& devnode) {
-    struct stat st{};
-    if (::stat(devnode.c_str(), &st) < 0 || !S_ISCHR(st.st_mode)) return;
-    std::ofstream("/sys/dev/char/" + std::to_string(major(st.st_rdev)) + ":" +
-                  std::to_string(minor(st.st_rdev)) + "/uevent") << "change";
+/// Ask udev to re-process a device with the current rules.
+static void trigger_change(const Node& n) {
+    std::ofstream(n.sysfs / "uevent") << "change";
 }
 
 /// Warn about processes that opened the node before it was hidden: they
 /// keep their file descriptor and still see the physical controller.
-static void warn_existing_users(const std::vector<std::string>& devnodes) {
+static void warn_existing_users(const std::vector<Node>& devnodes) {
     const std::string self = std::to_string(::getpid());
     std::error_code ec;
     fs::directory_iterator procs("/proc", ec), end;
@@ -127,7 +134,7 @@ static void warn_existing_users(const std::vector<std::string>& devnodes) {
             const auto target = fs::read_symlink(fds->path(), link_ec).string();
             if (link_ec) continue;
             bool match = false;
-            for (const auto& n : devnodes) match = match || target == n;
+            for (const auto& n : devnodes) match = match || target == n.devnode;
             if (!match) continue;
 
             std::string comm;
@@ -157,6 +164,11 @@ NodeHider& NodeHider::operator=(NodeHider&& other) noexcept {
 
 void NodeHider::hide(const std::string& sysfs_path) {
     if (sysfs_path.empty() || !sysfs_path.starts_with("/sys/") || sysfs_path == device_) return;
+    if (sysfs_path.find_first_of("*?[]|\"\\") != std::string::npos) {
+        std::cerr << "[ds4linux] Not hiding " << sysfs_path
+                  << ": unexpected characters in its sysfs path\n";
+        return;
+    }
     release();
     device_ = sysfs_path;
     if (hidden_devices()[sysfs_path]++ > 0) return;  // already hidden
@@ -167,10 +179,11 @@ void NodeHider::hide(const std::string& sysfs_path) {
     for (const auto& node : nodes) {
         // Take effect right away; the "change" event below makes udev apply
         // the rule too (dropping the uaccess tag that logind would act on)
-        ::chmod(node.c_str(), 0600);
-        if (::removexattr(node.c_str(), "system.posix_acl_access") < 0 &&
-            errno != ENODATA && errno != ENOTSUP) {
-            std::cerr << "[ds4linux] Could not remove the ACL of " << node << ": "
+        const char* path = node.devnode.c_str();
+        ::chmod(path, 0600);
+        if (::removexattr(path, "system.posix_acl_access") < 0 &&
+            errno != ENODATA && errno != ENOTSUP && errno != ENOENT) {
+            std::cerr << "[ds4linux] Could not remove the ACL of " << path << ": "
                       << std::strerror(errno) << "\n";
         }
         trigger_change(node);
@@ -199,7 +212,7 @@ void NodeHider::clear_stale_rules() {
     if (!fs::exists(kRulesFile, ec)) return;
     std::cerr << "[ds4linux] Removing controller-hiding rules left by a previous run\n";
     fs::remove(kRulesFile, ec);
-    run({"udevadm", "control", "--reload"});
+    run({"udevadm", "control", "--timeout=5", "--reload"});
     run({"udevadm", "trigger", "--settle", "--action=change",
          "--subsystem-match=input", "--subsystem-match=hidraw"});
 }
