@@ -1,11 +1,13 @@
 // ds4linux::daemon — VirtualX360 (uinput Xbox 360 controller)
 
 #include "ds4linux/virtual_x360.h"
+#include "ds4linux/debug.h"
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
@@ -58,6 +60,11 @@ struct VirtualX360::Impl {
             e.weak      = up.effect.u.rumble.weak_magnitude;
             e.length_ms = up.effect.replay.length;
             up.retval = 0;
+            if (g_debug) {
+                std::fprintf(stderr, "[ds4linux] debug: x360 FF upload id=%d strong=%u "
+                             "weak=%u length=%ums\n", up.effect.id, e.strong, e.weak,
+                             unsigned{e.length_ms});
+            }
         } else {
             up.retval = -EINVAL;
         }
@@ -76,6 +83,10 @@ struct VirtualX360::Impl {
 
     void handle_ff_play(int effect_id, std::int32_t value, Clock::time_point now) {
         auto it = effects.find(effect_id);
+        if (g_debug) {
+            std::fprintf(stderr, "[ds4linux] debug: x360 FF play id=%d value=%d%s\n",
+                         effect_id, value, it == effects.end() ? " (unknown effect)" : "");
+        }
         if (it == effects.end()) return;
         auto& e = it->second;
         if (value <= 0) {

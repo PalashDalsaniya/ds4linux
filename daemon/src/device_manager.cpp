@@ -2,6 +2,7 @@
 
 #include "ds4linux/device_manager.h"
 #include "ds4linux/constants.h"
+#include "ds4linux/debug.h"
 #include "ds4linux/mapping.h"
 #include "ds4linux/virtual_x360.h"
 
@@ -664,6 +665,12 @@ void DeviceManager::apply_rumble(ControllerSlot& slot,
     const int heavy = testing ? slot.test_heavy : scale_rumble(slot.game_heavy, k);
     const int light = testing ? slot.test_light : scale_rumble(slot.game_light, k);
     if (heavy == slot.sent_heavy && light == slot.sent_light) return;
+    if (g_debug) {
+        std::fprintf(stderr, "[ds4linux] debug: %s motors heavy=%d light=%d "
+                     "(%s, profile \"%s\" strength %.2f)\n",
+                     slot.evdev_path.c_str(), heavy, light, testing ? "test" : "app",
+                     slot.profile.name.c_str(), k);
+    }
     slot.physical->set_rumble(static_cast<std::uint8_t>(heavy),
                               static_cast<std::uint8_t>(light));
     slot.sent_heavy = heavy;

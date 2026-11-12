@@ -204,6 +204,7 @@ ds4linux/
 - **Permission errors:** The daemon needs root. Run with `sudo`.
 - **`ds4linux-ctl` / the GUI can't connect:** The daemon isn't running (or was started with a different `--socket`). Start it with `sudo ds4linux-daemon` or `sudo systemctl start ds4linux`.
 - **Xbox 360 mode falls back to DualShock 4:** The `uinput` module isn't loaded. Run `sudo modprobe uinput`.
+- **No rumble or lightbar from a game:** Run `sudo ds4linux-daemon --debug`. Every rumble / lightbar report a game sends is logged (`app output via ...`), as is every motor change sent to the controller (`motors heavy=... light=...`). If no `app output` lines appear, the game isn't sending rumble to the virtual controller.
 
 
 ## Game Compatibility

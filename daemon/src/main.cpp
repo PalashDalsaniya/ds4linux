@@ -8,6 +8,7 @@
 // Runs as: systemd service (root) → /usr/bin/ds4linux-daemon
 
 #include "ds4linux/constants.h"
+#include "ds4linux/debug.h"
 #include "ds4linux/device_manager.h"
 #include "ds4linux/ipc_handler.h"
 #include "ds4linux/ipc_server.h"
@@ -46,6 +47,7 @@ static void print_usage() {
         "  --generic=VID:PID,..  Only for these gamepads (hex IDs, e.g. 046d:c21f)\n"
         "  --socket=PATH         Control socket (default " << kSocketPath << ")\n"
         "  --state-dir=DIR       Profiles and settings (default " << kStateDir << ")\n"
+        "  --debug               Log rumble / lightbar traffic from games\n"
         "  --version             Print version and exit\n"
         "  -h, --help            Show this help\n";
 }
@@ -108,6 +110,8 @@ int main(int argc, char** argv) {
         } else if (arg == "--version") {
             std::cout << "ds4linux-daemon " << kVersion << "\n";
             return EXIT_SUCCESS;
+        } else if (arg == "--debug") {
+            g_debug = true;
         } else if (arg == "--generic") {
             options.generic_enabled = true;
         } else if (arg.rfind("--generic=", 0) == 0) {

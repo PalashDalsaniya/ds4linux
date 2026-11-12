@@ -8,6 +8,7 @@
 
 #include "ds4linux/virtual_device.h"
 #include "ds4linux/constants.h"
+#include "ds4linux/debug.h"
 
 #include <algorithm>
 #include <array>
@@ -422,6 +423,46 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     [[maybe_unused]] auto rc = ::write(impl_->fd, &ev, sizeof(ev));
 }
 
+// ── DS4 output report (rumble + lightbar) from an application ────────────────
+//   USB: id 0x05, common block at byte 1
+//   BT:  id 0x11, [1] hw_control, [2] audio_control, common block at byte 3
+//   common: [0] valid_flag0 (0x01 motors, 0x02 LED) [1] valid_flag1
+//           [2] reserved [3] right/weak motor [4] left/strong motor [5..7] RGB
+
+static void parse_ds4_output(const std::uint8_t* d, std::size_t sz, const char* via,
+                             RumbleOutput& result) {
+    std::size_t c = 0;  // offset of the common block
+    if (sz >= 1 && d[0] == 0x05) c = 1;
+    else if (sz >= 1 && d[0] == 0x11) c = 3;
+
+    if (c == 0 || sz < c + 8) {
+        if (g_debug) {
+            std::fprintf(stderr, "[ds4linux] debug: ignored output report via %s: "
+                         "id=0x%02x len=%zu\n", via, sz ? d[0] : 0u, sz);
+        }
+        return;
+    }
+    const std::uint8_t* p = d + c;
+    const std::uint8_t flags = p[0];
+    if (flags & 0x01) {
+        result.light = p[3];
+        result.heavy = p[4];
+    }
+    if (flags & 0x02) {
+        result.led_r = p[5];
+        result.led_g = p[6];
+        result.led_b = p[7];
+        result.led_changed = true;
+    }
+    if (g_debug) {
+        std::fprintf(stderr, "[ds4linux] debug: app output via %s: id=0x%02x len=%zu "
+                     "flags=0x%02x motors(heavy=%u light=%u)%s rgb=(%u,%u,%u)%s\n",
+                     via, d[0], sz, flags, p[4], p[3],
+                     (flags & 0x01) ? "" : " [ignored]", p[5], p[6], p[7],
+                     (flags & 0x02) ? "" : " [ignored]");
+    }
+}
+
 // ── handle_events: UHID_OUTPUT (rumble/LED) and feature report requests ─────
 // Runs on the I/O thread only.
 
@@ -435,35 +476,10 @@ void VirtualDevice::Impl::handle_events() {
 
         switch (ev.type) {
 
-        case UHID_OUTPUT: {
-            // Application sent an output report (e.g. rumble + LED).
-            // DS4 USB Output Report 0x05 layout:
-            //   Byte 0: Report ID (0x05)
-            //   Byte 1: valid_flag0  (0xFF = all)
-            //   Byte 2: valid_flag1
-            //   Byte 3: reserved
-            //   Byte 4: right/weak motor (0–255)
-            //   Byte 5: left/strong motor (0–255)
-            //   Byte 6: LED red
-            //   Byte 7: LED green
-            //   Byte 8: LED blue
-            auto* d = ev.u.output.data;
-            auto  sz = ev.u.output.size;
-            if (sz >= 9 && d[0] == 0x05) {
-                std::uint8_t flags = d[1];
-                if (flags & 0x01) { // motor control
-                    result.light = d[4];
-                    result.heavy = d[5];
-                }
-                if (flags & 0x02) { // LED control
-                    result.led_r = d[6];
-                    result.led_g = d[7];
-                    result.led_b = d[8];
-                    result.led_changed = true;
-                }
-            }
+        case UHID_OUTPUT:
+            // Output report written to the hidraw node (or by hid-playstation)
+            parse_ds4_output(ev.u.output.data, ev.u.output.size, "write", result);
             break;
-        }
 
         case UHID_GET_REPORT: {
             // Kernel/application requests a feature report.
@@ -552,7 +568,13 @@ void VirtualDevice::Impl::handle_events() {
         }
 
         case UHID_SET_REPORT: {
-            // Application sets a feature report.  Acknowledge immediately.
+            // Feature or output report sent as a SET_REPORT request (e.g.
+            // hidapi's hid_send_output_report / HIDIOCSOUTPUT).  Output
+            // reports carry rumble / LED like UHID_OUTPUT; acknowledge all.
+            if (ev.u.set_report.rtype == UHID_OUTPUT_REPORT) {
+                parse_ds4_output(ev.u.set_report.data, ev.u.set_report.size,
+                                 "set_report", result);
+            }
             struct uhid_event reply{};
             reply.type = UHID_SET_REPORT_REPLY;
             reply.u.set_report_reply.id  = ev.u.set_report.id;
