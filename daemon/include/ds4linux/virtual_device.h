@@ -76,16 +76,32 @@ struct RumbleOutput {
     bool led_changed = false;
 };
 
+/// A virtual controller that games see (DS4 via UHID, or Xbox 360 via uinput).
+class VirtualOutput {
+public:
+    virtual ~VirtualOutput() = default;
+
+    /// Publish the (profile-mapped) controller state to applications.
+    virtual void send_report(const DS4InputState& state) = 0;
+
+    /// Take the rumble/LED output that applications sent since the last call
+    /// (fields are -1 / led_changed=false when nothing new arrived).
+    virtual RumbleOutput take_output() = 0;
+
+    /// Becomes readable when output may be pending (for epoll registration).
+    [[nodiscard]] virtual int output_fd() const noexcept = 0;
+};
+
 /// Creates and manages a virtual DS4 gamepad via /dev/uhid.
 /// This produces both /dev/input/eventX and /dev/hidrawX nodes.
-class VirtualDevice {
+class VirtualDevice final : public VirtualOutput {
 public:
     /// Create a virtual DS4 gamepad via UHID with the given MAC address
     /// (display order, e.g. {0x30, 0x0E, 0xD5, ...}).  The MAC must be unique:
     /// hid-playstation refuses to bind two devices with the same MAC.
     /// Throws std::system_error on failure.
     explicit VirtualDevice(const std::array<std::uint8_t, 6>& mac);
-    ~VirtualDevice();
+    ~VirtualDevice() override;
 
     VirtualDevice(const VirtualDevice&) = delete;
     VirtualDevice& operator=(const VirtualDevice&) = delete;
@@ -93,14 +109,10 @@ public:
     VirtualDevice& operator=(VirtualDevice&&) noexcept;
 
     /// Pack the DS4 input state into an HID report and dispatch via UHID.
-    void send_report(const DS4InputState& state);
+    void send_report(const DS4InputState& state) override;
 
-    /// Take the rumble/LED output that applications sent since the last call
-    /// (fields are -1 / led_changed=false when nothing new arrived).
-    RumbleOutput take_output();
-
-    /// Becomes readable when output is pending (for epoll registration).
-    [[nodiscard]] int output_fd() const noexcept;
+    RumbleOutput take_output() override;
+    [[nodiscard]] int output_fd() const noexcept override;
 
 private:
     struct Impl;

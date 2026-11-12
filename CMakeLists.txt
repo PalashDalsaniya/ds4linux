@@ -35,6 +35,8 @@ add_link_options(
 # ── Options ───────────────────────────────────────────────────────────────────
 option(DS4LINUX_BUILD_GUI    "Build the Qt6 GUI client"       OFF)
 option(DS4LINUX_BUILD_DAEMON "Build the backend daemon"       ON)
+option(DS4LINUX_BUILD_CLI    "Build the ds4linux-ctl CLI"     ON)
+option(DS4LINUX_BUILD_TESTS  "Build the tests (run with ctest)" ON)
 option(DS4LINUX_ENABLE_PACKAGING "Enable CPack configuration for DEB/RPM"  OFF)
 
 # ── Subdirectories ────────────────────────────────────────────────────────────
@@ -42,6 +44,15 @@ add_subdirectory(common)
 
 if(DS4LINUX_BUILD_DAEMON)
     add_subdirectory(daemon)
+endif()
+
+if(DS4LINUX_BUILD_CLI)
+    add_subdirectory(cli)
+endif()
+
+if(DS4LINUX_BUILD_TESTS AND DS4LINUX_BUILD_DAEMON)
+    enable_testing()
+    add_subdirectory(tests)
 endif()
 
 if(DS4LINUX_BUILD_GUI)
@@ -63,8 +74,9 @@ if(DS4LINUX_ENABLE_PACKAGING)
         DESTINATION lib/udev/rules.d
     )
     
-    # Dynamically generate and install the uhid module load file
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ds4linux.conf "uhid\n")
+    # Dynamically generate and install the module load file
+    # (uhid: virtual DS4, uinput: virtual Xbox 360)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ds4linux.conf "uhid\nuinput\n")
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ds4linux.conf
         DESTINATION lib/modules-load.d
     )

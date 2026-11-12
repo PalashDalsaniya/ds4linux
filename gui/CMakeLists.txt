@@ -9,15 +9,17 @@ add_executable(ds4linux-gui
     src/main.cpp
     src/main_window.cpp
     src/ipc_client.cpp
-    src/device_widget.cpp
+    src/controllers_page.cpp
     src/led_picker.cpp
     src/profile_editor.cpp
+    src/tester_page.cpp
     # Headers with Q_OBJECT — must be listed for AUTOMOC
     include/ds4linux/main_window.h
     include/ds4linux/ipc_client.h
-    include/ds4linux/device_widget.h
+    include/ds4linux/controllers_page.h
     include/ds4linux/led_picker.h
     include/ds4linux/profile_editor.h
+    include/ds4linux/tester_page.h
 )
 
 target_include_directories(ds4linux-gui PRIVATE
@@ -35,3 +37,4 @@ target_link_libraries(ds4linux-gui PRIVATE
 target_compile_features(ds4linux-gui PRIVATE cxx_std_20)
 
 install(TARGETS ds4linux-gui DESTINATION bin)
+install(FILES ds4linux.desktop DESTINATION share/applications)

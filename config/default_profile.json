@@ -27,8 +27,5 @@
         "inner": 0.0,
         "outer": 1.0
     },
-    "touchpad_as_mouse": false,
-    "touchpad_sensitivity": 1.0,
-    "button_map": {},
-    "axis_map": {}
+    "button_map": {}
 }
