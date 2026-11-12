@@ -313,6 +313,7 @@ void DeviceManager::scan() {
                 slot.touchpad_path = tp_path;
                 slot.touch_x = slot.physical_touchpad->abs_range(ABS_MT_POSITION_X);
                 slot.touch_y = slot.physical_touchpad->abs_range(ABS_MT_POSITION_Y);
+                slot.hidden.hide(tp_path);
                 fds_changed_ = true;
                 std::cout << "[ds4linux] Touchpad active: " << tp_path << "\n";
             } catch (const std::exception& ex) {
@@ -328,6 +329,7 @@ void DeviceManager::scan() {
                 slot.motion_path = mo_path;
                 slot.gyro_res  = slot.physical_motion->abs_range(ABS_RX).resolution;
                 slot.accel_res = slot.physical_motion->abs_range(ABS_X).resolution;
+                slot.hidden.hide(mo_path);
                 fds_changed_ = true;
                 std::cout << "[ds4linux] Motion sensors active: " << mo_path << "\n";
             } catch (const std::exception& ex) {
@@ -376,6 +378,7 @@ void DeviceManager::on_device_removed(const std::string& evdev_path) {
 void DeviceManager::detach_touchpad(ControllerSlot& slot) {
     std::cerr << "[ds4linux] Touchpad gone: " << slot.touchpad_path << "\n";
     slot.physical_touchpad.reset();
+    slot.hidden.release(slot.touchpad_path);
     slot.touchpad_path.clear();
     for (auto& t : slot.ds4_state.touches) t.active = false;
     slot.ds4_state.touchpad = false;
@@ -385,6 +388,7 @@ void DeviceManager::detach_touchpad(ControllerSlot& slot) {
 void DeviceManager::detach_motion(ControllerSlot& slot) {
     std::cerr << "[ds4linux] Motion sensors gone: " << slot.motion_path << "\n";
     slot.physical_motion.reset();
+    slot.hidden.release(slot.motion_path);
     slot.motion_path.clear();
     slot.last_motion_sync = {};
     fds_changed_ = true;
@@ -895,6 +899,10 @@ bool DeviceManager::open_slot(const std::string& evdev_path,
                                     slot.profile.lightbar_color.b);
 
         emit(slot);  // publish the seeded state (held buttons, deflected sticks)
+
+        // Games and Steam must only see the virtual controller
+        slot.hidden.hide(evdev_path);
+        slot.hidden.hide_hidraw_of(physical_id);
 
         slots_.emplace(evdev_path, std::move(slot));
         fds_changed_ = true;

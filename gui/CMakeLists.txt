@@ -8,6 +8,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 add_executable(ds4linux-gui
     src/main.cpp
     src/main_window.cpp
+    src/daemon_control.cpp
     src/ipc_client.cpp
     src/controllers_page.cpp
     src/led_picker.cpp
@@ -15,6 +16,7 @@ add_executable(ds4linux-gui
     src/tester_page.cpp
     # Headers with Q_OBJECT — must be listed for AUTOMOC
     include/ds4linux/main_window.h
+    include/ds4linux/daemon_control.h
     include/ds4linux/ipc_client.h
     include/ds4linux/controllers_page.h
     include/ds4linux/led_picker.h

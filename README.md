@@ -10,7 +10,7 @@ The daemon:
 2. Grabs exclusive access via `libevdev` so no other process sees the raw device.
 3. Creates a virtual DualShock 4 controller via Linux `uhid` (with its own hidraw node, touchpad and motion sensors), or a virtual Xbox 360 controller via `uinput`.
 4. Forwards all input events through the controller's profile (deadzones, button remaps), and rumble / lightbar output back to the controller.
-5. Installs udev rules to hide the physical controller and expose only the virtual one.
+5. Hides the physical controller from other programs while it is in use, and exposes only the virtual one. When the daemon stops, the controller is handed back and works as a normal (raw) controller again.
 
 You control it with the `ds4linux-ctl` command or the `ds4linux-gui` app.
 
@@ -99,29 +99,31 @@ Controllers can be connected before or after the daemon starts. The daemon monit
 
 Connect your controller via **USB or Bluetooth**. ds4linux detects supported controllers while it is running.
 
-### 2. Start the daemon
+### 2. Start ds4linux when you want it
 
-Every time you want to use ds4linux, run:
+ds4linux runs as a systemd service that is **not** started automatically, so your controllers stay normal controllers until you turn emulation on. Start and stop it from the GUI (**Start ds4linux** / **Stop ds4linux**) or the command line:
 
 ```bash
-sudo ds4linux-daemon
+ds4linux-ctl start       # start emulation: hides the physical controllers
+ds4linux-ctl stop        # stop it: the raw controllers work again
+ds4linux-ctl restart
 ```
 
-Press `Ctrl+C` to stop the daemon when you're done.
+You don't need `sudo`. Starting or stopping asks for your password once (polkit), and it is remembered for a few minutes. In the GUI you can also tick **Start ds4linux when this app opens**.
+
+To have it running all the time instead:
+
+```bash
+ds4linux-ctl autostart on    # start at boot   (off: don't; no argument: show)
+```
+
+Extra daemon options go in `/etc/default/ds4linux`, for example `DS4LINUX_ARGS=--generic`. Restart ds4linux after changing it.
+
+You can also run the daemon in a terminal for debugging: `sudo ds4linux-daemon --debug` (`Ctrl+C` stops it).
 
 ### 3. Launch Steam (or any other game launcher)
 
-For best compatibility, **open Steam after the daemon is running**. This ensures Steam only sees the virtual DS4 device and avoids conflicts with the daemon's exclusive grab on the physical controller.
-
-### Running as a service (optional)
-
-The packages install a systemd unit. To start the daemon automatically:
-
-```bash
-sudo systemctl enable --now ds4linux.service
-```
-
-Extra daemon options go in `/etc/default/ds4linux`, for example `DS4LINUX_ARGS=--generic`. Restart the service after changing it.
+**Start ds4linux before Steam.** A program that opened the physical controller before ds4linux hid it keeps seeing it, so Steam would show two controllers. If Steam was already running, restart it; the daemon log names any program that still has the controller open.
 
 ### Controlling the daemon: `ds4linux-ctl`
 
@@ -148,7 +150,7 @@ Run `ds4linux-ctl --help` for the full list (including `profile import` / `expor
 
 ### GUI
 
-The GUI is not in the release packages yet; build it from source with `-DDS4LINUX_BUILD_GUI=ON` (see [Manual Build](#manual-build)). `ds4linux-gui` shows the connected controllers (battery, profile, emulated controller), edits profiles (emulated controller, lightbar, rumble strength, stick and trigger deadzones, button remapping) and has a live controller tester that shows both the raw input and what games receive after the profile. It talks to the running daemon, so start the daemon first.
+The GUI is not in the release packages yet; build it from source with `-DDS4LINUX_BUILD_GUI=ON` (see [Manual Build](#manual-build)). `ds4linux-gui` shows the connected controllers (battery, profile, emulated controller), edits profiles (emulated controller, lightbar, rumble strength, stick and trigger deadzones, button remapping) and has a live controller tester that shows both the raw input and what games receive after the profile. If ds4linux isn't running, the GUI offers a **Start ds4linux** button; while it runs, **Stop ds4linux** and **Start at boot** are in the status bar.
 
 ### Profiles
 
@@ -199,10 +201,11 @@ ds4linux/
 
 ## Troubleshooting
 
-- **Daemon doesn't detect controller:** Confirm it is connected over USB or Bluetooth and that the daemon is running as root.
-- **Steam shows duplicate controllers:** Ensure the udev rules are installed (`/etc/udev/rules.d/99-ds4linux.rules`) and that Steam was launched *after* the daemon.
-- **Permission errors:** The daemon needs root. Run with `sudo`.
-- **`ds4linux-ctl` / the GUI can't connect:** The daemon isn't running (or was started with a different `--socket`). Start it with `sudo ds4linux-daemon` or `sudo systemctl start ds4linux`.
+- **Daemon doesn't detect controller:** Confirm it is connected over USB or Bluetooth and that ds4linux is running (`ds4linux-ctl ping`).
+- **Steam shows duplicate controllers:** Steam opened the controller before ds4linux started. Restart Steam (or start ds4linux first). `journalctl -u ds4linux` names any program that still has the physical controller open.
+- **The raw controller doesn't work after stopping ds4linux:** reconnect it, or run `sudo udevadm trigger --action=change --subsystem-match=hidraw --subsystem-match=input`.
+- **Permission errors:** The daemon itself runs as root (as the `ds4linux` service, or with `sudo` in a terminal); `ds4linux-ctl` and the GUI don't need root.
+- **`ds4linux-ctl` / the GUI can't connect:** The daemon isn't running (or was started with a different `--socket`). Start it with `ds4linux-ctl start` (or the GUI).
 - **Xbox 360 mode falls back to DualShock 4:** The `uinput` module isn't loaded. Run `sudo modprobe uinput`.
 - **No rumble or lightbar from a game:** Run `sudo ds4linux-daemon --debug`. Every rumble / lightbar report a game sends is logged (`app output via ...`), as is every motor change sent to the controller (`motors heavy=... light=...`). If no `app output` lines appear, the game isn't sending rumble to the virtual controller.
 

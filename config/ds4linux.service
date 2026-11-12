@@ -11,6 +11,10 @@ EnvironmentFile=-/etc/default/ds4linux
 ExecStart=/usr/bin/ds4linux-daemon $DS4LINUX_ARGS
 Restart=on-failure
 RestartSec=3
+# Give the physical controllers back even if the daemon crashed: re-apply
+# the normal permissions and uaccess ACLs of input and hidraw nodes.  ("+"
+# runs it outside the sandbox below.)
+ExecStopPost=+-/usr/bin/udevadm trigger --action=change --subsystem-match=hidraw --subsystem-match=input
 
 # Security hardening
 ProtectHome=read-only
@@ -37,5 +41,8 @@ Group=root
 # Socket path
 RuntimeDirectory=ds4linux
 
+# Not enabled by the packages: start it when you want emulation
+# (ds4linux-ctl start, or the GUI), or `ds4linux-ctl autostart on` to
+# start it at boot.
 [Install]
 WantedBy=multi-user.target

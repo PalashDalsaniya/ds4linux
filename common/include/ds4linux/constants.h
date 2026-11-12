@@ -12,6 +12,9 @@ inline constexpr std::string_view kVersion = "0.1.1";
 
 // ── IPC ──────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kSocketPath = "/run/ds4linux.sock";
+
+/// systemd unit that runs the daemon (started on demand, not at boot)
+inline constexpr std::string_view kServiceName = "ds4linux.service";
 inline constexpr std::uint32_t    kIpcMaxMessageBytes = 64 * 1024; // 64 KiB
 
 // ── USB Vendor / Product IDs ─────────────────────────────────────────────────
