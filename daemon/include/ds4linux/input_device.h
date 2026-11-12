@@ -116,6 +116,7 @@ public:
     [[nodiscard]] std::string uniq() const;
 
 private:
+    bool ensure_hidraw();
     bool send_ds4_output();
     bool send_dualsense_output();
     void detect_dualsense_vibration_mode();

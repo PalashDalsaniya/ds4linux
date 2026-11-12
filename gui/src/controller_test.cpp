@@ -208,24 +208,6 @@ void faceSymbol(QPainter& p, QPointF c, std::string_view name, QColor color) {
 
 } // namespace
 
-// ── TestProfile ──────────────────────────────────────────────────────────────
-
-TestProfile TestProfile::fromJson(const QJsonObject& profile) {
-    auto zone = [&](const char* key) {
-        const auto z = profile.value(key).toObject();
-        return Zone{z.value("type").toInt(0), z.value("inner").toDouble(0),
-                    z.value("outer").toDouble(1)};
-    };
-    TestProfile t;
-    t.left_stick  = zone("left_stick_dz");
-    t.right_stick = zone("right_stick_dz");
-    t.l2          = zone("left_trigger_dz");
-    t.r2          = zone("right_trigger_dz");
-    const auto c  = profile.value("lightbar_color").toObject();
-    t.lightbar    = QColor(c.value("r").toInt(0), c.value("g").toInt(0), c.value("b").toInt(255));
-    return t;
-}
-
 // ── ControllerView ───────────────────────────────────────────────────────────
 
 ControllerView::ControllerView(QWidget* parent) : QWidget(parent) {
@@ -477,7 +459,7 @@ void StickPanel::setFrame(const QJsonObject& in, const QJsonObject& out) {
     update();
 }
 
-void StickPanel::setZone(const TestProfile::Zone& zone) {
+void StickPanel::setZone(const DeadzoneParams& zone) {
     zone_ = zone;
     update();
 }
@@ -504,13 +486,13 @@ void StickPanel::paintEvent(QPaintEvent*) {
     p.drawLine(c - QPointF(0, r), c + QPointF(0, r));
 
     // Deadzone rings (dashed): inner, and outer when below 100 %
-    if (zone_.type != 0) {
+    if (zone_.type != DeadzoneType::None) {
         QPen dz(QColor(255, 190, 60, 170), 1.2, Qt::DashLine);
         p.setPen(dz);
         p.setBrush(QColor(255, 190, 60, 28));
         auto ring = [&](double f, bool fill) {
             if (!fill) p.setBrush(Qt::NoBrush);
-            if (zone_.type == 2) p.drawRect(QRectF(c.x() - f * r, c.y() - f * r, 2 * f * r, 2 * f * r));
+            if (zone_.type == DeadzoneType::Square) p.drawRect(QRectF(c.x() - f * r, c.y() - f * r, 2 * f * r, 2 * f * r));
             else p.drawEllipse(c, f * r, f * r);
         };
         if (zone_.inner > 0) ring(zone_.inner, true);
@@ -554,7 +536,7 @@ void TriggerPanel::setFrame(const QJsonObject& in, const QJsonObject& out) {
     update();
 }
 
-void TriggerPanel::setZones(const TestProfile::Zone& l2, const TestProfile::Zone& r2) {
+void TriggerPanel::setZones(const DeadzoneParams& l2, const DeadzoneParams& r2) {
     zone_ = {l2, r2};
     update();
 }
@@ -593,7 +575,7 @@ void TriggerPanel::paintEvent(QPaintEvent*) {
         p.drawRoundedRect(level(out_[i]), 5, 5);
 
         // Deadzone marks
-        if (zone_[i].type != 0) {
+        if (zone_[i].type != DeadzoneType::None) {
             p.setPen(QPen(QColor(255, 190, 60, 200), 1.5, Qt::DashLine));
             const QRectF inner = bar.adjusted(3, 3, -3, -3);
             for (double f : {zone_[i].inner, zone_[i].outer}) {

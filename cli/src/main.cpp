@@ -110,7 +110,10 @@ public:
         std::size_t sent = 0;
         while (sent < frame.size()) {
             ssize_t n = ::send(fd_, frame.data() + sent, frame.size() - sent, MSG_NOSIGNAL);
-            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && errno == EINTR) {
+                if (g_stop) throw std::runtime_error("interrupted");
+                continue;
+            }
             if (n <= 0) throw std::runtime_error("Lost connection to the daemon");
             sent += static_cast<std::size_t>(n);
         }
@@ -319,7 +322,7 @@ DeadzoneParams parse_deadzone(const std::string& value, bool stick, DeadzonePara
         if (!type) throw UsageError("Deadzone type must be circular, square or none");
         dz.type = *type;
     } else if (!stick) {
-        dz.type = dz.inner > 0 || dz.outer < 1 ? DeadzoneType::Circular : DeadzoneType::None;
+        dz = trigger_deadzone(dz.inner, dz.outer);
     } else if (dz.type == DeadzoneType::None) {
         dz.type = DeadzoneType::Circular;
     }
@@ -450,7 +453,12 @@ void print_state(const json& s, const char* title) {
 }
 
 void cmd_test(Client& c, const json& device) {
-    std::signal(SIGINT, [](int) { g_stop = 1; });
+    // No SA_RESTART: a recv() waiting on a stuck daemon must return EINTR
+    // so Ctrl+C can end the command
+    struct sigaction sa{};
+    sa.sa_handler = [](int) { g_stop = 1; };
+    sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGINT, &sa, nullptr);
     const json req = with_device({{"type", "GetInputState"}}, device);
 
     bool first = true;

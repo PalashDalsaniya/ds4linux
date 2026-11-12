@@ -42,6 +42,13 @@ struct DeadzoneParams {
     double outer       = 1.00;
 };
 
+/// A trigger deadzone from its range.  Triggers have no circular / square
+/// shape: the type only switches it on (any range set) or off (0..1).
+inline DeadzoneParams trigger_deadzone(double inner, double outer) {
+    const bool on = inner > 0 || outer < 1;
+    return {on ? DeadzoneType::Circular : DeadzoneType::None, inner, outer};
+}
+
 // ── DS4 buttons (remapping sources and targets) ──────────────────────────────
 enum class DS4Button : std::uint8_t {
     Cross, Circle, Square, Triangle,

@@ -6,6 +6,8 @@
 // JSON objects the daemon sends (sticks 0-255, triggers 0-255, buttons,
 // D-pad, gyro / accel in DS4 units, touch points in DS4 touchpad units).
 
+#include <ds4linux/profile.h>
+
 #include <QColor>
 #include <QJsonObject>
 #include <QPointF>
@@ -15,19 +17,6 @@
 #include <deque>
 
 namespace ds4linux::gui {
-
-/// Profile settings the test page draws (deadzone rings, lightbar colour).
-struct TestProfile {
-    struct Zone {
-        int    type  = 0;    // 0 none, 1 circular, 2 square (triggers: 0 = off)
-        double inner = 0.0;
-        double outer = 1.0;
-    };
-    Zone   left_stick, right_stick, l2, r2;
-    QColor lightbar{0, 0, 255};
-
-    static TestProfile fromJson(const QJsonObject& profile);
-};
 
 /// A drawing of the controller: buttons light up, sticks move, triggers fill.
 class ControllerView : public QWidget {
@@ -55,7 +44,7 @@ public:
     StickPanel(const QString& title, const char* xKey, const char* yKey,
                const char* clickKey, QWidget* parent = nullptr);
     void setFrame(const QJsonObject& in, const QJsonObject& out);
-    void setZone(const TestProfile::Zone& zone);
+    void setZone(const DeadzoneParams& zone);
     void clear();
     [[nodiscard]] QSize minimumSizeHint() const override { return {170, 200}; }
 
@@ -70,7 +59,7 @@ private:
     QPointF            in_, out_;
     bool               click_ = false;
     bool               valid_ = false;
-    TestProfile::Zone  zone_;
+    DeadzoneParams  zone_;
     std::deque<QPointF> trail_;
 };
 
@@ -79,7 +68,7 @@ class TriggerPanel : public QWidget {
 public:
     explicit TriggerPanel(QWidget* parent = nullptr);
     void setFrame(const QJsonObject& in, const QJsonObject& out);
-    void setZones(const TestProfile::Zone& l2, const TestProfile::Zone& r2);
+    void setZones(const DeadzoneParams& l2, const DeadzoneParams& r2);
     void clear();
     [[nodiscard]] QSize minimumSizeHint() const override { return {150, 200}; }
 
@@ -89,7 +78,7 @@ protected:
 private:
     std::array<int, 2> in_{}, out_{};
     std::array<bool, 2> button_{};
-    std::array<TestProfile::Zone, 2> zone_{};
+    std::array<DeadzoneParams, 2> zone_{};
 };
 
 /// The touchpad: finger positions with their tracking IDs and trails.

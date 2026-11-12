@@ -47,6 +47,8 @@ private:
     void saveProfile(const Profile& p, const std::function<void()>& onSaved);
     void save();
     void createProfile(bool copyCurrent);
+    /// Ask before dropping unsaved edits; true if there are none or the user agrees.
+    bool confirmDiscard(const QString& note = {});
     void deleteProfile();
     void setDirty(bool dirty);
     DeadzoneControls makeDeadzone(bool stick);

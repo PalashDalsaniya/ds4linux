@@ -171,11 +171,11 @@ void TesterPage::loadProfile() {
     ipc_->request("LoadProfile", {{"name", name}}, [this, name](const QJsonObject& r) {
         if (r.value("type").toString() != "Profile") return;
         if (currentDevice().value("profile").toString() != name) return;  // stale
-        const auto t = TestProfile::fromJson(r.value("profile").toObject());
-        left_->setZone(t.left_stick);
-        right_->setZone(t.right_stick);
-        triggers_->setZones(t.l2, t.r2);
-        pad_->setLightbar(t.lightbar);
+        const Profile p = profileFromJson(r.value("profile").toObject());
+        left_->setZone(p.left_stick_dz);
+        right_->setZone(p.right_stick_dz);
+        triggers_->setZones(p.left_trigger_dz, p.right_trigger_dz);
+        pad_->setLightbar(QColor(p.lightbar_color.r, p.lightbar_color.g, p.lightbar_color.b));
     });
 }
 

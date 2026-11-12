@@ -15,7 +15,6 @@
 #include <linux/input.h>
 #include <stdexcept>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
 
@@ -120,10 +119,6 @@ InputDevice::InputDevice(const std::string& evdev_path, bool grab_exclusive)
                                 "Failed to open " + evdev_path);
     }
 
-    ::fchmod(impl_->fd, 0600);
-    std::cout << "[ds4linux] Locked " << evdev_path
-              << " permissions to 0600 (root-only)\n";
-
     int rc = libevdev_new_from_fd(impl_->fd, &impl_->dev);
     if (rc < 0) {
         throw std::system_error(-rc, std::system_category(),
@@ -149,15 +144,6 @@ InputDevice::InputDevice(const std::string& evdev_path, bool grab_exclusive)
         impl_->grabbed = true;
     }
 
-    // Eagerly open hidraw to hold it from other apps (Steam uses hidraw)
-    impl_->hidraw_fd_ = open_hidraw();
-    if (impl_->hidraw_fd_ >= 0) {
-        std::cout << "[ds4linux] Acquired hidraw for " << evdev_path << "\n";
-    }
-
-    if (impl_->model_ == ControllerModel::DualSense) {
-        detect_dualsense_vibration_mode();
-    }
 }
 
 InputDevice::~InputDevice() = default;
@@ -220,6 +206,16 @@ void InputDevice::replay_current_state(const EventHandler& handler) const {
 
 // ── hidraw helpers ───────────────────────────────────────────────────────────
 
+/// Open the hidraw node on first use (only the gamepad node of a slot ever
+/// sends output; hiding it from other programs is NodeHider's job).
+bool InputDevice::ensure_hidraw() {
+    if (impl_->hidraw_fd_ >= 0) return true;
+    impl_->hidraw_fd_ = open_hidraw();
+    if (impl_->hidraw_fd_ < 0) return false;
+    if (impl_->model_ == ControllerModel::DualSense) detect_dualsense_vibration_mode();
+    return true;
+}
+
 int InputDevice::open_hidraw() const {
     // The hidraw node is a sibling of this evdev node under the same HID
     // device: /sys/class/input/eventX/device/device/hidraw/hidrawN
@@ -233,9 +229,6 @@ int InputDevice::open_hidraw() const {
         int hfd = ::open(node.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
         if (hfd < 0) continue;
 
-        ::fchmod(hfd, 0600);
-        std::cout << "[ds4linux] Locked " << node
-                  << " permissions to 0600 (root-only)\n";
         return hfd; // caller owns this fd
     }
     return -1;
@@ -250,11 +243,6 @@ int InputDevice::open_hidraw() const {
 //        CRC32 (seed 0xA2) over bytes 0..73 @74, 78 bytes total
 
 bool InputDevice::send_ds4_output() {
-    if (impl_->hidraw_fd_ < 0) {
-        impl_->hidraw_fd_ = open_hidraw();
-    }
-    if (impl_->hidraw_fd_ < 0) return false;
-
     constexpr std::uint8_t kFlagMotor = 0x01;
     constexpr std::uint8_t kFlagLed   = 0x02;
     const auto& st = impl_->ds4_out;
@@ -306,11 +294,6 @@ void InputDevice::detect_dualsense_vibration_mode() {
 }
 
 bool InputDevice::send_dualsense_output() {
-    if (impl_->hidraw_fd_ < 0) {
-        impl_->hidraw_fd_ = open_hidraw();
-    }
-    if (impl_->hidraw_fd_ < 0) return false;
-
     constexpr std::uint8_t kFlag0CompatVibration  = 0x01;
     constexpr std::uint8_t kFlag0HapticsSelect    = 0x02;
     constexpr std::uint8_t kFlag1LightbarEnable   = 0x04;
@@ -382,10 +365,7 @@ bool InputDevice::send_ff_rumble(std::uint8_t heavy, std::uint8_t light) {
 
 bool InputDevice::set_lightbar(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
     if (impl_->model_ == ControllerModel::Generic) return false; // no lightbar
-    if (impl_->hidraw_fd_ < 0) {
-        impl_->hidraw_fd_ = open_hidraw();
-    }
-    if (impl_->hidraw_fd_ < 0) return false;
+    if (!ensure_hidraw()) return false;
 
     if (impl_->model_ == ControllerModel::DualSense ||
         impl_->model_ == ControllerModel::DualSenseEdge) {
@@ -407,10 +387,7 @@ bool InputDevice::set_rumble(std::uint8_t heavy, std::uint8_t light) {
     if (impl_->model_ == ControllerModel::Generic) {
         return send_ff_rumble(heavy, light);
     }
-    if (impl_->hidraw_fd_ < 0) {
-        impl_->hidraw_fd_ = open_hidraw();
-    }
-    if (impl_->hidraw_fd_ < 0) return false;
+    if (!ensure_hidraw()) return false;
 
     if (impl_->model_ == ControllerModel::DualSense ||
         impl_->model_ == ControllerModel::DualSenseEdge) {

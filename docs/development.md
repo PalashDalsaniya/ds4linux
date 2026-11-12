@@ -66,7 +66,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Run a development daemon next to an installed one with its own socket and state directory:
+Run a development daemon with its own socket and state directory:
 
 ```bash
 sudo ./build/daemon/ds4linux-daemon --debug --socket=/tmp/ds4.sock --state-dir=/tmp/ds4-state
@@ -74,6 +74,6 @@ sudo ./build/daemon/ds4linux-daemon --debug --socket=/tmp/ds4.sock --state-dir=/
 ./build/gui/ds4linux-gui --socket /tmp/ds4.sock
 ```
 
-Only one daemon can own a controller at a time, so stop the service first (`ds4linux-ctl stop`).
+Only one daemon can run at a time (it holds `/run/ds4linux.lock`), so stop the service first (`ds4linux-ctl stop`).
 
 Packages: configure with `-DDS4LINUX_ENABLE_PACKAGING=ON`, then `cpack --config build/CPackConfig.cmake`. The release workflow (`.github/workflows/release.yaml`) builds the `.deb` and `.rpm`.

@@ -29,86 +29,35 @@ DeviceManager::DeviceManager(DeviceManagerOptions options)
     : options_(std::move(options)) {}
 DeviceManager::~DeviceManager() = default;
 
-// ── Capability helpers ───────────────────────────────────────────────────────
+// ── Node classification ──────────────────────────────────────────────────────
 
-static auto test_bit = [](const unsigned long* bits, unsigned int bit) -> bool {
-    return (bits[bit / (8 * sizeof(unsigned long))] >>
-            (bit % (8 * sizeof(unsigned long)))) & 1;
-};
+/// Which part of a controller an evdev node is, from its event capabilities:
+/// the gamepad (buttons + sticks), the touchpad (multitouch + BTN_TOUCH) or
+/// the motion sensors (accel + gyro axes, no keys).
+static DeviceManager::NodeType classify_node(int fd) {
+    using T = DeviceManager::NodeType;
+    constexpr std::size_t kBits = 8 * sizeof(unsigned long);
+    unsigned long ev[(EV_MAX + kBits) / kBits]{};
+    unsigned long key[(KEY_MAX + kBits) / kBits]{};
+    unsigned long abs[(ABS_MAX + kBits) / kBits]{};
+    auto has = [](const unsigned long* bits, unsigned n) {
+        return ((bits[n / kBits] >> (n % kBits)) & 1) != 0;
+    };
 
-/// Check whether the evdev node is the *main gamepad* interface.
-static bool is_gamepad_node(int fd) {
-    unsigned long evbits[((EV_MAX + 1) + 8 * sizeof(unsigned long) - 1) /
-                          (8 * sizeof(unsigned long))] = {};
-    if (::ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), evbits) < 0)
-        return false;
-    if (!test_bit(evbits, EV_KEY) || !test_bit(evbits, EV_ABS))
-        return false;
-
-    unsigned long keybits[((KEY_MAX + 1) + 8 * sizeof(unsigned long) - 1) /
-                           (8 * sizeof(unsigned long))] = {};
-    if (::ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) < 0)
-        return false;
-    if (!test_bit(keybits, BTN_SOUTH) && !test_bit(keybits, BTN_GAMEPAD))
-        return false;
-
-    unsigned long absbits[((ABS_MAX + 1) + 8 * sizeof(unsigned long) - 1) /
-                           (8 * sizeof(unsigned long))] = {};
-    if (::ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) < 0)
-        return false;
-    if (!test_bit(absbits, ABS_X))
-        return false;
-
-    return true;
-}
-
-/// Check if this is a touchpad node (has ABS_MT_POSITION_X + BTN_TOUCH).
-static bool is_touchpad_node(int fd) {
-    unsigned long evbits[((EV_MAX + 1) + 8 * sizeof(unsigned long) - 1) /
-                          (8 * sizeof(unsigned long))] = {};
-    if (::ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), evbits) < 0)
-        return false;
-    if (!test_bit(evbits, EV_ABS) || !test_bit(evbits, EV_KEY))
-        return false;
-
-    unsigned long absbits[((ABS_MAX + 1) + 8 * sizeof(unsigned long) - 1) /
-                           (8 * sizeof(unsigned long))] = {};
-    if (::ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) < 0)
-        return false;
-    if (!test_bit(absbits, ABS_MT_POSITION_X))
-        return false;
-
-    unsigned long keybits[((KEY_MAX + 1) + 8 * sizeof(unsigned long) - 1) /
-                           (8 * sizeof(unsigned long))] = {};
-    if (::ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) < 0)
-        return false;
-    if (!test_bit(keybits, BTN_TOUCH))
-        return false;
-
-    return true;
-}
-
-/// Check if this is a motion sensor node (has ABS_X/Y/Z + ABS_RX/RY/RZ but no keys).
-static bool is_motion_node(int fd) {
-    unsigned long evbits[((EV_MAX + 1) + 8 * sizeof(unsigned long) - 1) /
-                          (8 * sizeof(unsigned long))] = {};
-    if (::ioctl(fd, EVIOCGBIT(0, sizeof(evbits)), evbits) < 0)
-        return false;
-    if (!test_bit(evbits, EV_ABS))
-        return false;
-    // Motion sensor nodes have NO EV_KEY
-    if (test_bit(evbits, EV_KEY))
-        return false;
-
-    unsigned long absbits[((ABS_MAX + 1) + 8 * sizeof(unsigned long) - 1) /
-                           (8 * sizeof(unsigned long))] = {};
-    if (::ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbits)), absbits) < 0)
-        return false;
-
-    // Must have all 6 axes: X, Y, Z, RX, RY, RZ
-    return test_bit(absbits, ABS_X) && test_bit(absbits, ABS_Y) &&
-           test_bit(absbits, ABS_Z) && test_bit(absbits, ABS_RX) &&
-           test_bit(absbits, ABS_RY) && test_bit(absbits, ABS_RZ);
+    if (::ioctl(fd, EVIOCGBIT(0, sizeof(ev)), ev) < 0 || !has(ev, EV_ABS) ||
+        ::ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs)), abs) < 0) {
+        return T::Other;
+    }
+    if (!has(ev, EV_KEY)) {
+        for (unsigned axis : {ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ}) {
+            if (!has(abs, axis)) return T::Other;
+        }
+        return T::Motion;
+    }
+    if (::ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(key)), key) < 0) return T::Other;
+    if (has(key, BTN_SOUTH) && has(abs, ABS_X)) return T::Gamepad;
+    if (has(key, BTN_TOUCH) && has(abs, ABS_MT_POSITION_X)) return T::Touchpad;
+    return T::Other;
 }
 
 /// Get the physical device path from sysfs for an event node.
@@ -194,100 +143,76 @@ DeviceManager::allocate_virtual_mac(const std::string& seed,
 
 // ── Scanning ─────────────────────────────────────────────────────────────────
 
+std::optional<DeviceManager::Node> DeviceManager::probe_node(const std::string& path) const {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        static bool perm_warned = false;
+        if (errno == EACCES && !std::exchange(perm_warned, true)) {
+            std::cerr << "[ds4linux] Permission denied on " << path
+                      << " — is the daemon running as root?\n";
+        }
+        return std::nullopt;
+    }
+    struct Close { int fd; ~Close() { ::close(fd); } } closer{fd};
+
+    struct input_id id{};
+    if (::ioctl(fd, EVIOCGID, &id) < 0) return std::nullopt;
+    const bool sony    = is_supported_sony(id);
+    const bool generic = !sony && generic_allowed(id.vendor, id.product);
+    if (!sony && !generic) return std::nullopt;
+
+    Node node{path, get_physical_id(path), {}, NodeType::Other, generic};
+
+    // Skip our own virtual devices (gamepad, touchpad and motion nodes the
+    // kernel DS4 driver creates for the UHID device).  For generic pads also
+    // skip software devices — uinput pads from Steam Input and uhid pads
+    // from other remappers — which would otherwise feed back.  Bluetooth
+    // pads may legitimately live under uhid (bluetoothd).
+    const bool software_device =
+        node.physical_id.empty() ||
+        (node.physical_id.starts_with("/sys/devices/virtual/") && id.bustype != BUS_BLUETOOTH);
+    if (is_own_virtual_node(fd, id, node.physical_id) || (generic && software_device)) {
+        return std::nullopt;
+    }
+
+    node.type = classify_node(fd);
+    if (node.type == NodeType::Other) return std::nullopt;
+    char name[256] = {};
+    ::ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+    node.name = name;
+    return node;
+}
+
 void DeviceManager::scan() {
     std::cout << "[ds4linux] Scanning /dev/input/ for controllers...\n";
 
     // First pass: find all supported event nodes and classify them
-    struct NodeInfo {
-        std::string path;
-        std::string physical_id;
-        enum Type { Gamepad, Touchpad, Motion, Other } type;
-    };
-    std::vector<NodeInfo> nodes;
-
+    std::vector<Node> nodes;
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator("/dev/input", ec)) {
-        auto fname = entry.path().filename().string();
-        if (fname.rfind("event", 0) != 0) continue;
-
-        int fd = ::open(entry.path().c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-        if (fd < 0) {
-            if (errno == EACCES) {
-                static bool perm_warned = false;
-                if (!perm_warned) {
-                    std::cerr << "[ds4linux] Permission denied on "
-                              << entry.path()
-                              << " — is the daemon running as root?\n";
-                    perm_warned = true;
-                }
-            }
-            continue;
+        if (!entry.path().filename().string().starts_with("event")) continue;
+        auto node = probe_node(entry.path().string());
+        if (!node) continue;
+        if (!is_open_node(node->path)) {
+            static constexpr const char* kTypeNames[] = {"gamepad", "touchpad", "motion"};
+            std::cout << "[ds4linux] Found " << (node->generic ? "generic " : "")
+                      << kTypeNames[static_cast<int>(node->type)] << ": " << node->path
+                      << " (" << node->name << ") phys=" << node->physical_id << "\n";
         }
-
-        struct input_id id{};
-        if (::ioctl(fd, EVIOCGID, &id) < 0) {
-            ::close(fd);
-            continue;
-        }
-
-        const bool sony    = is_supported_sony(id);
-        const bool generic = !sony && generic_allowed(id.vendor, id.product);
-        if (!sony && !generic) {
-            ::close(fd);
-            continue;
-        }
-
-        auto phys_id = get_physical_id(entry.path().string());
-
-        // Skip our own virtual devices (gamepad, touchpad and motion nodes
-        // the kernel DS4 driver creates for the UHID device).  For generic
-        // pads also skip software devices — uinput pads from Steam Input and
-        // uhid pads from other remappers — which would otherwise feed back.
-        // Bluetooth pads may legitimately live under uhid (bluetoothd).
-        const bool software_device =
-            phys_id.empty() ||
-            (phys_id.starts_with("/sys/devices/virtual/") && id.bustype != BUS_BLUETOOTH);
-        if (is_own_virtual_node(fd, id, phys_id) || (generic && software_device)) {
-            ::close(fd);
-            continue;
-        }
-
-        NodeInfo::Type type = NodeInfo::Other;
-        if (is_gamepad_node(fd))       type = NodeInfo::Gamepad;
-        else if (is_touchpad_node(fd)) type = NodeInfo::Touchpad;
-        else if (is_motion_node(fd))   type = NodeInfo::Motion;
-
-        if (type != NodeInfo::Other) {
-            char name_buf[256] = {};
-            ::ioctl(fd, EVIOCGNAME(sizeof(name_buf)), name_buf);
-
-            const char* type_str = "gamepad";
-            if (type == NodeInfo::Touchpad) type_str = "touchpad";
-            if (type == NodeInfo::Motion)   type_str = "motion";
-
-            if (!is_open_node(entry.path().string())) {
-                std::cout << "[ds4linux] Found " << (generic ? "generic " : "")
-                          << type_str << ": " << entry.path() << " (" << name_buf << ")"
-                          << " phys=" << phys_id << "\n";
-            }
-
-            nodes.push_back({entry.path().string(), phys_id, type});
-        }
-
-        ::close(fd);
+        nodes.push_back(std::move(*node));
     }
 
     // Second pass: for each gamepad node, find its sibling touchpad & motion
     int opened = 0;
     for (const auto& gp : nodes) {
-        if (gp.type != NodeInfo::Gamepad) continue;
+        if (gp.type != NodeType::Gamepad) continue;
 
         std::string tp_path, mo_path;
         for (const auto& n : nodes) {
             if (!gp.physical_id.empty() && n.physical_id == gp.physical_id &&
                 n.path != gp.path) {
-                if (n.type == NodeInfo::Touchpad && tp_path.empty()) tp_path = n.path;
-                if (n.type == NodeInfo::Motion   && mo_path.empty()) mo_path = n.path;
+                if (n.type == NodeType::Touchpad && tp_path.empty()) tp_path = n.path;
+                if (n.type == NodeType::Motion   && mo_path.empty()) mo_path = n.path;
             }
         }
 
@@ -355,7 +280,9 @@ bool DeviceManager::is_open_node(const std::string& evdev_path) const {
 }
 
 void DeviceManager::on_device_added(const std::string& evdev_path) {
-    if (is_open_node(evdev_path)) return;
+    // Only a new controller node is worth a rescan; most "add" events are
+    // other input devices or the nodes of our own virtual DS4
+    if (is_open_node(evdev_path) || !probe_node(evdev_path)) return;
     // A full scan applies the same filtering and pairs sibling nodes
     scan();
 }
@@ -751,6 +678,9 @@ void DeviceManager::create_output(ControllerSlot& slot, OutputMode mode) {
     }
     slot.virtual_dev = std::move(out);
     slot.output_mode = created;
+    // The games' rumble belonged to the old device, which can no longer
+    // stop it: start the new one silent
+    slot.game_heavy = slot.game_light = 0;
     fds_changed_ = true;
 }
 
@@ -868,7 +798,6 @@ bool DeviceManager::open_slot(const std::string& evdev_path,
     try {
         ControllerSlot slot;
         slot.evdev_path  = evdev_path;
-        slot.physical_id = physical_id;
         slot.physical    = std::make_unique<InputDevice>(evdev_path, /*grab=*/true);
         slot.gamepad_map = build_gamepad_map(*slot.physical);
         slot.physical->replay_current_state(
