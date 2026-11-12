@@ -13,13 +13,13 @@ Restart=on-failure
 RestartSec=3
 # Let udev finish re-processing controllers a previous instance released,
 # so those events can't undo the hiding this one is about to apply
-ExecStartPre=-/usr/bin/udevadm settle --timeout=5
+ExecStartPre=-udevadm settle --timeout=5
 # Give the physical controllers back even if the daemon crashed: drop its
 # hiding rules and re-apply the normal permissions and uaccess ACLs ("+"
 # runs these outside the sandbox below)
-ExecStopPost=+-/usr/bin/rm -f /run/udev/rules.d/72-ds4linux-hidden.rules
-ExecStopPost=+-/usr/bin/udevadm control --reload
-ExecStopPost=+-/usr/bin/udevadm trigger --settle --action=change --subsystem-match=hidraw --subsystem-match=input
+ExecStopPost=+-rm -f /run/udev/rules.d/72-ds4linux-hidden.rules
+ExecStopPost=+-udevadm control --reload
+ExecStopPost=+-udevadm trigger --settle --action=change --subsystem-match=hidraw --subsystem-match=input
 
 # Security hardening
 ProtectHome=read-only
