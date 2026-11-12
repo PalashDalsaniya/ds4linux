@@ -51,7 +51,7 @@ ds4linux-ctl -d 1 profile use Racing
 
 ## Game Compatibility
 
-### Working
+Tested and working:
 
 | Game | Status |
 | ---- | ------ |
@@ -59,12 +59,6 @@ ds4linux-ctl -d 1 profile use Racing
 | The Stanley Parable: Ultra Deluxe | ✅ Works |
 | Yakuza 0 | ✅ Works |
 
-### Not Working
-
-| Game | Status | Notes |
-| ---- | ------ | ----- |
-| Detroit: Become Human | ❌ Does not work | works with [SenseShock](https://github.com/muhammad23012009/senseshock) |
-
-If a game doesn't work with ds4linux, you can try [SenseShock](https://github.com/muhammad23012009/senseshock) as an alternative.
+If a game doesn't work, try the other emulated controller (`ds4linux-ctl profile set NAME output x360`, or `ds4`). [SenseShock](https://github.com/muhammad23012009/senseshock) is an alternative for games that need a real DualSense.
 
 If you have tested ds4linux with a game, please let me know so I can add it to this list! You can contact me on Discord: **palashd**
