@@ -265,9 +265,11 @@ void DeviceManager::scan() {
             if (type == NodeInfo::Touchpad) type_str = "touchpad";
             if (type == NodeInfo::Motion)   type_str = "motion";
 
-            std::cout << "[ds4linux] Found " << (generic ? "generic " : "")
-                      << type_str << ": " << entry.path() << " (" << name_buf << ")"
-                      << " phys=" << phys_id << "\n";
+            if (!is_open_node(entry.path().string())) {
+                std::cout << "[ds4linux] Found " << (generic ? "generic " : "")
+                          << type_str << ": " << entry.path() << " (" << name_buf << ")"
+                          << " phys=" << phys_id << "\n";
+            }
 
             nodes.push_back({entry.path().string(), phys_id, type});
         }
@@ -342,14 +344,50 @@ void DeviceManager::scan() {
 
 // ── Hotplug ──────────────────────────────────────────────────────────────────
 
+bool DeviceManager::is_open_node(const std::string& evdev_path) const {
+    for (const auto& [path, slot] : slots_) {
+        if (path == evdev_path || slot.touchpad_path == evdev_path ||
+            slot.motion_path == evdev_path) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void DeviceManager::on_device_added(const std::string& evdev_path) {
-    if (slots_.count(evdev_path)) return;
+    if (is_open_node(evdev_path)) return;
     // A full scan applies the same filtering and pairs sibling nodes
     scan();
 }
 
 void DeviceManager::on_device_removed(const std::string& evdev_path) {
-    close_slot(evdev_path);
+    if (slots_.count(evdev_path)) {
+        std::cout << "[ds4linux] Controller removed: " << evdev_path << "\n";
+        close_slot(evdev_path);
+        return;
+    }
+    // A touchpad or motion node of an open controller
+    for (auto& [path, slot] : slots_) {
+        if (slot.physical_touchpad && slot.touchpad_path == evdev_path) detach_touchpad(slot);
+        if (slot.physical_motion && slot.motion_path == evdev_path) detach_motion(slot);
+    }
+}
+
+void DeviceManager::detach_touchpad(ControllerSlot& slot) {
+    std::cerr << "[ds4linux] Touchpad gone: " << slot.touchpad_path << "\n";
+    slot.physical_touchpad.reset();
+    slot.touchpad_path.clear();
+    for (auto& t : slot.ds4_state.touches) t.active = false;
+    slot.ds4_state.touchpad = false;
+    fds_changed_ = true;
+}
+
+void DeviceManager::detach_motion(ControllerSlot& slot) {
+    std::cerr << "[ds4linux] Motion sensors gone: " << slot.motion_path << "\n";
+    slot.physical_motion.reset();
+    slot.motion_path.clear();
+    slot.last_motion_sync = {};
+    fds_changed_ = true;
 }
 
 // ── Normalisation helpers ────────────────────────────────────────────────────
@@ -567,6 +605,8 @@ void DeviceManager::translate_events() {
     //   ABS_Z=L2 (analog), ABS_RZ=R2 (analog)
     //   ABS_HAT0X=D-pad X, ABS_HAT0Y=D-pad Y
 
+    std::vector<std::string> disconnected;  // closed after the loop
+
     for (auto& [path, slot] : slots_) {
         if (!slot.physical || !slot.virtual_dev) continue;
 
@@ -585,7 +625,9 @@ void DeviceManager::translate_events() {
             }
         );
         if (!ok) {
-            std::cerr << "[ds4linux] Device disconnected: " << path << "\n";
+            std::cerr << "[ds4linux] Controller disconnected: " << path << "\n";
+            disconnected.push_back(path);
+            continue;
         }
 
         // ── Virtual output (rumble/LED from applications → physical) ────
@@ -601,7 +643,7 @@ void DeviceManager::translate_events() {
 
         // ── Motion events (physical → DS4 report IMU fields) ────────────
         if (slot.physical_motion) {
-            slot.physical_motion->read_events(
+            ok = slot.physical_motion->read_events(
                 [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
                     if (type == EV_SYN) {
                         if (code == SYN_REPORT) {
@@ -613,11 +655,12 @@ void DeviceManager::translate_events() {
                     apply_motion_event(slot, type, code, value);
                 }
             );
+            if (!ok) detach_motion(slot);
         }
 
         // ── Touchpad events (physical → DS4 report touch points) ────────
         if (slot.physical_touchpad) {
-            slot.physical_touchpad->read_events(
+            ok = slot.physical_touchpad->read_events(
                 [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
                     if (type == EV_KEY && code == BTN_LEFT) {
                         // BTN_LEFT on the touchpad node is the touchpad click
@@ -632,6 +675,7 @@ void DeviceManager::translate_events() {
                     }
                 }
             );
+            if (!ok) detach_touchpad(slot);
         }
 
         // ── Battery (polled from sysfs) ─────────────────────────────────
@@ -648,6 +692,8 @@ void DeviceManager::translate_events() {
             emit(slot);
         }
     }
+
+    for (const auto& path : disconnected) close_slot(path);
 }
 
 /// Map the raw state through the slot's profile and send it to the output.
