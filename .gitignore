@@ -17,3 +17,6 @@ tmp/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude notes (local only)
+.claude/
