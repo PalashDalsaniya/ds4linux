@@ -23,4 +23,12 @@ Create, duplicate, delete and edit profiles: emulated controller (DualShock 4 / 
 
 ## Controller test
 
-A live picture of the selected controller: buttons, sticks, triggers, touchpad and motion. Switch between **Input** (what the controller sends) and **Output** (what games receive after the profile's deadzones and remaps).
+A live test of the selected controller, like Steam's controller test:
+
+- **Controller drawing** (DualShock 4 or DualSense): pressed buttons light up, the sticks move, L2/R2 fill as you pull them, touches show on the touchpad, and the lightbar shows the profile's colour. Choose whether it shows the **raw input** or **what games see** (after the profile's deadzones and remapping).
+- **Left / right stick:** raw position (ring) and what games see (dot, with a trail), the profile's deadzones as dashed lines, and the values.
+- **Triggers:** raw pull and output, with deadzone marks.
+- **Touchpad:** both fingers with their paths and coordinates, and the click.
+- **Motion:** a tilt indicator from the accelerometer, and live gyro (°/s) and accelerometer (g) graphs.
+
+The header shows the connection, battery, profile and emulated controller.
