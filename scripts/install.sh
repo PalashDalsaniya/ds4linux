@@ -25,6 +25,7 @@ cmake --build build -j"$(nproc)"
 # ── 3. Install binaries ──────────────────────────────────────────────────────
 echo "[3/4] Installing binaries..."
 sudo cmake --install build --prefix /usr
+sudo systemctl daemon-reload   # pick up ds4linux.service (not enabled)
 
 # ── 4. Install udev rules ─────────────────────────────────────────────────────
 echo "[4/4] Installing udev rules..."

@@ -8,6 +8,7 @@ add_executable(ds4linux-daemon
     src/input_device.cpp
     src/virtual_device.cpp
     src/device_manager.cpp
+    src/node_hider.cpp
     src/virtual_x360.cpp
     src/mapping.cpp
     src/profile_manager.cpp

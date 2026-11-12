@@ -12,6 +12,7 @@
 #include "ds4linux/device_manager.h"
 #include "ds4linux/ipc_handler.h"
 #include "ds4linux/ipc_server.h"
+#include "ds4linux/node_hider.h"
 #include "ds4linux/profile_manager.h"
 
 #include <csignal>
@@ -195,6 +196,9 @@ int main(int argc, char** argv) {
     sigemptyset(&sa.sa_mask);
     ::sigaction(SIGINT,  &sa, nullptr);
     ::sigaction(SIGTERM, &sa, nullptr);
+
+    // Controllers hidden by a daemon that didn't exit cleanly
+    NodeHider::clear_stale_rules();
 
     // ── Hotplug monitor (before the first scan, so nothing is missed) ───────
     HotplugMonitor hotplug;

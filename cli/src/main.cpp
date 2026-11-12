@@ -21,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <thread>
 #include <unistd.h>
@@ -65,7 +66,11 @@ Profiles:
   profile import <FILE>              Save a profile from a JSON file
   profile export <NAME> [FILE]       Write a profile as JSON (stdout by default)
 
-Other:
+Daemon (asks for your password once; the system remembers it briefly):
+  start                              Start emulation (hides the physical controllers)
+  stop                               Stop emulation (the raw controllers work again)
+  restart                            Restart the daemon
+  autostart [on | off]               Start the daemon at boot (no argument: show)
   ping                               Check that the daemon is running
 
 Buttons:)";
@@ -132,6 +137,80 @@ private:
     int fd_ = -1;
     std::vector<std::uint8_t> buf_;
 };
+
+// ── Daemon service (systemd) ─────────────────────────────────────────────────
+
+/// Run systemctl with `args`; returns its exit status.  Unprivileged
+/// start / stop requests go through polkit, which asks for the password on
+/// this terminal.
+int systemctl(const std::vector<std::string>& args) {
+    std::vector<char*> argv{const_cast<char*>("systemctl")};
+    for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    const pid_t pid = ::fork();
+    if (pid < 0) throw std::runtime_error(std::string("fork: ") + std::strerror(errno));
+    if (pid == 0) {
+        ::execvp("systemctl", argv.data());
+        std::perror("ds4linux-ctl: systemctl");
+        ::_exit(127);
+    }
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+void cmd_list(Client& client);
+
+int cmd_service(const std::string& cmd, const std::vector<std::string>& rest,
+                const std::string& socket_path) {
+    const std::string unit(kServiceName);
+
+    if (cmd == "autostart") {
+        if (rest.empty()) {
+            // Prints enabled / disabled; "disabled" is an answer, not an error
+            const int rc = systemctl({"is-enabled", unit});
+            return rc == 1 ? 0 : rc;
+        }
+        if (rest.size() != 1 || (rest[0] != "on" && rest[0] != "off")) {
+            throw UsageError("Use: autostart [on | off]");
+        }
+        const int rc = systemctl({rest[0] == "on" ? "enable" : "disable", unit});
+        if (rc == 0) {
+            std::cout << (rest[0] == "on" ? "ds4linux will start at boot\n"
+                                          : "ds4linux will no longer start at boot\n");
+        }
+        return rc;
+    }
+
+    if (!rest.empty()) throw UsageError("Use: " + cmd);
+    const int rc = systemctl({cmd, unit});
+    if (rc != 0) return rc;
+
+    if (cmd == "stop") {
+        std::cout << "ds4linux stopped; your controllers work as normal again\n";
+        return 0;
+    }
+    // Wait for the control socket, then show what the daemon picked up
+    std::optional<Client> client;
+    for (int i = 0; i < 50 && !client; ++i) {
+        try {
+            client.emplace(socket_path);
+            client->request({{"type", "Ping"}});
+        } catch (const std::exception&) {
+            client.reset();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    if (!client) {
+        std::cerr << "ds4linux-ctl: the service started but its control socket isn't "
+                     "answering; see `journalctl -u " << unit << "`\n";
+        return 1;
+    }
+    std::cout << "ds4linux is running\n";
+    cmd_list(*client);
+    return 0;
+}
 
 // ── Argument helpers ─────────────────────────────────────────────────────────
 
@@ -447,9 +526,13 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        Client client(socket_path);
         const auto& cmd = args[0];
         const std::vector<std::string> rest(args.begin() + 1, args.end());
+        if (cmd == "start" || cmd == "stop" || cmd == "restart" || cmd == "autostart") {
+            return cmd_service(cmd, rest, socket_path);
+        }
+
+        Client client(socket_path);
 
         if (cmd == "ping") {
             std::cout << "ds4linux daemon " << client.request({{"type", "Ping"}})["version"].get<std::string>()

@@ -2,6 +2,7 @@
 // ds4linux::daemon — Device manager: orchestrates physical → virtual mapping
 
 #include "ds4linux/input_device.h"
+#include "ds4linux/node_hider.h"
 #include "ds4linux/virtual_device.h"
 
 #include <ds4linux/profile.h>
@@ -39,6 +40,11 @@ struct GamepadMap {
 
 /// Holds the state for a single controller slot.
 struct ControllerSlot {
+    // Hides the physical nodes from other programs while the slot exists.
+    // Declared first so it is destroyed last: access is given back only
+    // after the nodes below are closed (and ungrabbed).
+    NodeHider hidden;
+
     // Physical input devices (one per event node)
     std::unique_ptr<InputDevice>   physical;          // gamepad (sticks/buttons)
     std::unique_ptr<InputDevice>   physical_touchpad; // touchpad

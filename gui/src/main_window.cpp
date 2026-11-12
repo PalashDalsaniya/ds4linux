@@ -2,13 +2,17 @@
 
 #include "ds4linux/main_window.h"
 #include "ds4linux/controllers_page.h"
+#include "ds4linux/daemon_control.h"
 #include "ds4linux/ipc_client.h"
 #include "ds4linux/profile_editor.h"
 #include "ds4linux/tester_page.h"
 
+#include <QCheckBox>
 #include <QCoreApplication>
 #include <QJsonObject>
 #include <QLabel>
+#include <QPushButton>
+#include <QSettings>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -27,13 +31,38 @@ MainWindow::MainWindow(QString socketPath, QWidget* parent)
     auto* central = new QWidget(this);
     auto* layout  = new QVBoxLayout(central);
 
-    offline_ = new QLabel(
-        QString("Not connected to the ds4linux daemon.\n\n"
-                "Start it with:  sudo ds4linux-daemon\n"
-                "or:  sudo systemctl start ds4linux\n\n"
-                "Waiting for %1 …").arg(socketPath_), this);
-    offline_->setAlignment(Qt::AlignCenter);
+    daemon_ = new DaemonControl(this);
+
+    // ── Not running: start button ────────────────────────────────────────────
+    offline_ = new QWidget(this);
+    auto* offLayout = new QVBoxLayout(offline_);
+    offLayout->addStretch();
+    offlineText_ = new QLabel(
+        "<h2>ds4linux is not running</h2>"
+        "<p>Your controllers work as normal (raw) controllers.<br>"
+        "Start ds4linux to use profiles, remapping and DS4 / Xbox 360 emulation.</p>",
+        offline_);
+    offlineText_->setAlignment(Qt::AlignCenter);
+    offLayout->addWidget(offlineText_);
+    startBtn_ = new QPushButton("Start ds4linux", offline_);
+    startBtn_->setMinimumWidth(200);
+    offLayout->addWidget(startBtn_, 0, Qt::AlignCenter);
+    auto* startOnOpen = new QCheckBox("Start ds4linux when this app opens", offline_);
+    startOnOpen->setChecked(QSettings().value("startDaemonOnOpen", false).toBool());
+    offLayout->addWidget(startOnOpen, 0, Qt::AlignCenter);
+    auto* hint = new QLabel(
+        "Starting or stopping asks for your password once.\n"
+        "Start ds4linux before Steam, or restart Steam afterwards.", offline_);
+    hint->setAlignment(Qt::AlignCenter);
+    hint->setEnabled(false);  // dimmed
+    offLayout->addWidget(hint);
+    offLayout->addStretch();
     layout->addWidget(offline_);
+
+    connect(startBtn_, &QPushButton::clicked, daemon_, &DaemonControl::start);
+    connect(startOnOpen, &QCheckBox::toggled, this, [](bool on) {
+        QSettings().setValue("startDaemonOnOpen", on);
+    });
 
     tabs_        = new QTabWidget(this);
     controllers_ = new ControllersPage(ipc_, this);
@@ -46,6 +75,23 @@ MainWindow::MainWindow(QString socketPath, QWidget* parent)
     setCentralWidget(central);
 
     statusBar()->showMessage("Connecting to daemon…");
+
+    // ── Running: stop button and start-at-boot ───────────────────────────────
+    bootBox_ = new QCheckBox("Start at boot", this);
+    bootBox_->setToolTip("Start ds4linux automatically when the computer starts");
+    stopBtn_ = new QPushButton("Stop ds4linux", this);
+    stopBtn_->setToolTip("Stop emulation and give the raw controllers back");
+    statusBar()->addPermanentWidget(bootBox_);
+    statusBar()->addPermanentWidget(stopBtn_);
+    connect(stopBtn_, &QPushButton::clicked, daemon_, &DaemonControl::stop);
+    connect(bootBox_, &QCheckBox::clicked, daemon_, &DaemonControl::setAutostart);
+    connect(daemon_, &DaemonControl::finished, this, &MainWindow::onServiceFinished);
+    connect(daemon_, &DaemonControl::busyChanged, this, [this](bool busy) {
+        startBtn_->setEnabled(!busy);
+        stopBtn_->setEnabled(!busy);
+        bootBox_->setEnabled(!busy);
+    });
+    refreshAutostart();
 
     connect(profiles_, &ProfileEditor::profilesChanged, controllers_, &ControllersPage::setProfiles);
     connect(controllers_, &ControllersPage::devicesChanged, tester_, &TesterPage::setDevices);
@@ -66,7 +112,17 @@ MainWindow::MainWindow(QString socketPath, QWidget* parent)
     connect(ipc_, &IpcClient::connected, this, &MainWindow::onConnected);
     connect(ipc_, &IpcClient::disconnected, this, &MainWindow::onDisconnected);
     connect(ipc_, &IpcClient::errorOccurred, this, [this](const QString&) {
-        if (!ipc_->isConnected()) onDisconnected();
+        if (ipc_->isConnected()) return;
+        onDisconnected();
+        // Not running when the app opened: start it if the user asked for that
+        if (!triedAutoStart_) {
+            triedAutoStart_ = true;
+            // Deferred: this can fire inside the constructor, before the
+            // window is shown, and the password dialog should follow it
+            if (QSettings().value("startDaemonOnOpen", false).toBool()) {
+                QTimer::singleShot(0, daemon_, &DaemonControl::start);
+            }
+        }
     });
 
     onDisconnected();
@@ -80,7 +136,9 @@ void MainWindow::connectToDaemon() {
 }
 
 void MainWindow::onConnected() {
+    triedAutoStart_ = true;
     retryTimer_->stop();
+    stopBtn_->show();
     offline_->hide();
     tabs_->show();
     ipc_->request("Ping", {}, [this](const QJsonObject& r) {
@@ -96,9 +154,34 @@ void MainWindow::onConnected() {
 void MainWindow::onDisconnected() {
     pollTimer_->stop();
     tabs_->hide();
+    stopBtn_->hide();
     offline_->show();
-    statusBar()->showMessage("Not connected to the daemon — retrying…");
+    if (!daemon_->busy()) statusBar()->showMessage("ds4linux is not running");
     if (!retryTimer_->isActive()) retryTimer_->start();
+}
+
+void MainWindow::onServiceFinished(const QString& action, const QString& error) {
+    if (!error.isEmpty()) {
+        statusBar()->showMessage(QString("Could not %1 ds4linux: %2").arg(action, error));
+        if (action == "enable" || action == "disable") refreshAutostart();
+        return;
+    }
+    if (action == "start") {
+        statusBar()->showMessage("ds4linux started");
+        connectToDaemon();
+    } else if (action == "stop") {
+        statusBar()->showMessage("ds4linux stopped; your controllers work as normal again");
+    } else {
+        statusBar()->showMessage(action == "enable" ? "ds4linux will start at boot"
+                                                    : "ds4linux will no longer start at boot");
+    }
+}
+
+void MainWindow::refreshAutostart() {
+    daemon_->queryAutostart([this](bool enabled, bool known) {
+        bootBox_->setChecked(enabled);
+        bootBox_->setVisible(known);  // hidden if the service isn't installed
+    });
 }
 
 } // namespace ds4linux::gui

@@ -896,6 +896,10 @@ bool DeviceManager::open_slot(const std::string& evdev_path,
 
         emit(slot);  // publish the seeded state (held buttons, deflected sticks)
 
+        // Games and Steam must only see the virtual controller: hide every
+        // node of the physical one (evdev and hidraw, also ones added later)
+        slot.hidden.hide(physical_id);
+
         slots_.emplace(evdev_path, std::move(slot));
         fds_changed_ = true;
         return true;
