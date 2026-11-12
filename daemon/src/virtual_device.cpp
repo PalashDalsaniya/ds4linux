@@ -443,10 +443,10 @@ static void parse_ds4_output(const std::uint8_t* d, std::size_t sz, const char* 
         return;
     }
     const std::uint8_t* p = d + c;
-    // Steam sends every DS4 effects report with no valid flags set and relies
-    // on the controller applying motors and LED anyway, as a real DS4 does:
-    // treat a report without flags as updating both.
-    const std::uint8_t flags = p[0] ? p[0] : 0x03;
+    // Only the fields the valid flags select are applied, like a real DS4.
+    // (Steam sends reports with no flags at all while rumble is off for the
+    // controller in its settings; they must not overwrite the lightbar.)
+    const std::uint8_t flags = p[0];
     if (flags & 0x01) {
         result.light = p[3];
         result.heavy = p[4];
@@ -460,7 +460,7 @@ static void parse_ds4_output(const std::uint8_t* d, std::size_t sz, const char* 
     if (g_debug) {
         std::fprintf(stderr, "[ds4linux] debug: app output via %s: id=0x%02x len=%zu "
                      "flags=0x%02x%s motors(heavy=%u light=%u)%s rgb=(%u,%u,%u)%s\n",
-                     via, d[0], sz, p[0], p[0] ? "" : " (none: apply all)", p[4], p[3],
+                     via, d[0], sz, p[0], p[0] ? "" : " (no fields valid)", p[4], p[3],
                      (flags & 0x01) ? "" : " [ignored]", p[5], p[6], p[7],
                      (flags & 0x02) ? "" : " [ignored]");
     }
