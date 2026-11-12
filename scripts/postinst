@@ -16,6 +16,11 @@ if command -v udevadm >/dev/null 2>&1; then
     udevadm trigger --subsystem-match=input --subsystem-match=hidraw >/dev/null 2>&1 || true
 fi
 
+# Make the (not enabled) ds4linux.service known to systemd
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
 modprobe uhid >/dev/null 2>&1 || true
 modprobe uinput >/dev/null 2>&1 || true
 

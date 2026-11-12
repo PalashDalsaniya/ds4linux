@@ -117,7 +117,11 @@ MainWindow::MainWindow(QString socketPath, QWidget* parent)
         // Not running when the app opened: start it if the user asked for that
         if (!triedAutoStart_) {
             triedAutoStart_ = true;
-            if (QSettings().value("startDaemonOnOpen", false).toBool()) daemon_->start();
+            // Deferred: this can fire inside the constructor, before the
+            // window is shown, and the password dialog should follow it
+            if (QSettings().value("startDaemonOnOpen", false).toBool()) {
+                QTimer::singleShot(0, daemon_, &DaemonControl::start);
+            }
         }
     });
 

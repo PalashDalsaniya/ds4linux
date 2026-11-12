@@ -78,6 +78,7 @@ cmake --build build -j$(nproc)
 
 # Install
 sudo cmake --install build --prefix /usr
+sudo systemctl daemon-reload
 
 # Copy udev rules
 sudo cp config/99-ds4linux.rules /etc/udev/rules.d/
@@ -119,7 +120,7 @@ ds4linux-ctl autostart on    # start at boot   (off: don't; no argument: show)
 
 Extra daemon options go in `/etc/default/ds4linux`, for example `DS4LINUX_ARGS=--generic`. Restart ds4linux after changing it.
 
-You can also run the daemon in a terminal for debugging: `sudo ds4linux-daemon --debug` (`Ctrl+C` stops it).
+You can also run the daemon in a terminal for debugging: `sudo ds4linux-daemon --debug` (`Ctrl+C` stops it). If it is killed instead, the controller stays hidden until ds4linux next starts and stops, or you reboot.
 
 ### 3. Launch Steam (or any other game launcher)
 
@@ -203,7 +204,7 @@ ds4linux/
 
 - **Daemon doesn't detect controller:** Confirm it is connected over USB or Bluetooth and that ds4linux is running (`ds4linux-ctl ping`).
 - **Steam shows duplicate controllers:** Steam opened the controller before ds4linux started. Restart Steam (or start ds4linux first). `journalctl -u ds4linux` names any program that still has the physical controller open.
-- **The raw controller doesn't work after stopping ds4linux:** reconnect it, or run `sudo udevadm trigger --action=change --subsystem-match=hidraw --subsystem-match=input`.
+- **The raw controller doesn't work after stopping ds4linux:** this only happens if a daemon started by hand was killed. Reconnect the controller, or start and stop ds4linux once (it removes what the killed one left behind).
 - **Permission errors:** The daemon itself runs as root (as the `ds4linux` service, or with `sudo` in a terminal); `ds4linux-ctl` and the GUI don't need root.
 - **`ds4linux-ctl` / the GUI can't connect:** The daemon isn't running (or was started with a different `--socket`). Start it with `ds4linux-ctl start` (or the GUI).
 - **Xbox 360 mode falls back to DualShock 4:** The `uinput` module isn't loaded. Run `sudo modprobe uinput`.

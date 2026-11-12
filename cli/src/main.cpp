@@ -167,7 +167,11 @@ int cmd_service(const std::string& cmd, const std::vector<std::string>& rest,
     const std::string unit(kServiceName);
 
     if (cmd == "autostart") {
-        if (rest.empty()) return systemctl({"is-enabled", unit});
+        if (rest.empty()) {
+            // Prints enabled / disabled; "disabled" is an answer, not an error
+            const int rc = systemctl({"is-enabled", unit});
+            return rc == 1 ? 0 : rc;
+        }
         if (rest.size() != 1 || (rest[0] != "on" && rest[0] != "off")) {
             throw UsageError("Use: autostart [on | off]");
         }
@@ -188,20 +192,24 @@ int cmd_service(const std::string& cmd, const std::vector<std::string>& rest,
         return 0;
     }
     // Wait for the control socket, then show what the daemon picked up
-    for (int i = 0; i < 50; ++i) {
+    std::optional<Client> client;
+    for (int i = 0; i < 50 && !client; ++i) {
         try {
-            Client client(socket_path);
-            client.request({{"type", "Ping"}});
-            std::cout << "ds4linux is running\n";
-            cmd_list(client);
-            return 0;
+            client.emplace(socket_path);
+            client->request({{"type", "Ping"}});
         } catch (const std::exception&) {
+            client.reset();
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
-    std::cerr << "ds4linux-ctl: the service started but its control socket isn't "
-                 "answering; see `journalctl -u " << unit << "`\n";
-    return 1;
+    if (!client) {
+        std::cerr << "ds4linux-ctl: the service started but its control socket isn't "
+                     "answering; see `journalctl -u " << unit << "`\n";
+        return 1;
+    }
+    std::cout << "ds4linux is running\n";
+    cmd_list(*client);
+    return 0;
 }
 
 // ── Argument helpers ─────────────────────────────────────────────────────────
