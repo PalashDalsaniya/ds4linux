@@ -466,6 +466,18 @@ static void parse_ds4_output(const std::uint8_t* d, std::size_t sz, const char* 
     }
 }
 
+/// Answer a GET_REPORT / SET_REPORT request.  The requester in the kernel
+/// blocks until the reply arrives, so retry briefly if the fd is full.
+static void write_reply(int fd, const uhid_event& reply, const char* what) {
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        if (::write(fd, &reply, sizeof(reply)) >= 0) return;
+        if (errno != EAGAIN) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    std::cerr << "[ds4linux] Failed to answer UHID " << what << ": "
+              << std::strerror(errno) << "\n";
+}
+
 // ── handle_events: UHID_OUTPUT (rumble/LED) and feature report requests ─────
 // Runs on the I/O thread only.
 
@@ -553,20 +565,7 @@ void VirtualDevice::Impl::handle_events() {
             }
             } // switch rnum
 
-            ssize_t rc;
-            int retries = 0;
-            do {
-                rc = ::write(fd, &reply, sizeof(reply));
-                if (rc < 0 && errno == EAGAIN) {
-                    retries++;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-            } while (rc < 0 && errno == EAGAIN && retries < 10);
-
-            if (rc < 0) {
-                std::cerr << "[ds4linux] Failed to write UHID_GET_REPORT_REPLY (rnum: "
-                          << (int)rnum << ") Error: " << errno << "\n";
-            }
+            write_reply(fd, reply, "GET_REPORT");
             break;
         }
 
@@ -582,19 +581,7 @@ void VirtualDevice::Impl::handle_events() {
             reply.type = UHID_SET_REPORT_REPLY;
             reply.u.set_report_reply.id  = ev.u.set_report.id;
             reply.u.set_report_reply.err = 0;
-            ssize_t rc;
-            int retries = 0;
-            do {
-                rc = ::write(fd, &reply, sizeof(reply));
-                if (rc < 0 && errno == EAGAIN) {
-                    retries++;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                }
-            } while (rc < 0 && errno == EAGAIN && retries < 50);
-            
-            if (rc < 0) {
-                std::cerr << "[ds4linux] Failed to write UHID_SET_REPORT_REPLY. Errno: " << errno << "\n";
-            }
+            write_reply(fd, reply, "SET_REPORT");
             break;
         }
 

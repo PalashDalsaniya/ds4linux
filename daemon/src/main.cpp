@@ -18,13 +18,16 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <iostream>
 #include <libudev.h>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <sys/epoll.h>
+#include <sys/file.h>
 #include <unistd.h>
 #include <vector>
 
@@ -69,6 +72,36 @@ static bool parse_id_list(const std::string& list,
         out.emplace_back(static_cast<std::uint16_t>(vid), static_cast<std::uint16_t>(pid));
     }
     return !out.empty();
+}
+
+// ── Single instance ──────────────────────────────────────────────────────────
+// A second daemon could own no controller, but on startup it would replace
+// the control socket and clear the running one's hiding rules.  Held for
+// the life of the process (the kernel drops the lock when it exits).
+
+static constexpr const char* kLockFile = "/run/ds4linux.lock";
+
+static bool acquire_instance_lock() {
+    const int fd = ::open(kLockFile, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        std::cerr << "[ds4linux] Can't open " << kLockFile << " (" << std::strerror(errno)
+                  << ") — is the daemon running as root?\n";
+        return false;
+    }
+    if (::flock(fd, LOCK_EX | LOCK_NB) < 0) {
+        char pid[32]{};
+        [[maybe_unused]] auto n = ::read(fd, pid, sizeof(pid) - 1);
+        std::cerr << "[ds4linux] Another ds4linux-daemon is already running"
+                  << (pid[0] ? std::string(" (pid ") + pid + ")" : std::string())
+                  << ". Stop it first: ds4linux-ctl stop\n";
+        ::close(fd);
+        return false;
+    }
+    const std::string self = std::to_string(::getpid());
+    if (::ftruncate(fd, 0) == 0) {
+        [[maybe_unused]] auto n = ::pwrite(fd, self.data(), self.size(), 0);
+    }
+    return true;  // fd intentionally kept open
 }
 
 // ── Hotplug (udev monitor) ───────────────────────────────────────────────────
@@ -183,6 +216,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "[ds4linux] Daemon v" << kVersion << " starting\n";
+    if (!acquire_instance_lock()) return EXIT_FAILURE;
     if (options.generic_enabled) {
         std::cout << "[ds4linux] Generic gamepad emulation enabled ("
                   << (options.generic_ids.empty() ? "all gamepads"

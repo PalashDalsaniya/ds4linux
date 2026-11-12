@@ -24,8 +24,7 @@ inline constexpr std::uint16_t kPidDS4v2        = 0x09CC;  // DualShock 4 v2
 inline constexpr std::uint16_t kPidDualSense    = 0x0CE6;  // DualSense
 inline constexpr std::uint16_t kPidDualSenseEdge = 0x0DF2; // DualSense Edge
 
-// ── Virtual device names ─────────────────────────────────────────────────────
-inline constexpr std::string_view kVirtualDS4Name        = "DS4Linux Virtual DS4";
+// ── Virtual DS4 identity ─────────────────────────────────────────────────────
 // UHID phys string of the virtual DS4.  USB-style so it looks like real
 // hardware, but unique so the scanner can recognise and skip its own devices.
 inline constexpr std::string_view kVirtualDS4Phys        = "usb-ds4linux-virtual/input0";
@@ -39,17 +38,6 @@ inline constexpr std::string_view kDefaultProfile    = "Default";
 // ── Polling ──────────────────────────────────────────────────────────────────
 inline constexpr int kEpollMaxEvents = 16;
 inline constexpr int kEpollTimeoutMs = 200; // also bounds timer latency
-
-// ── Lightbar defaults ────────────────────────────────────────────────────────
-inline constexpr std::uint8_t kDefaultLedR = 0x00;
-inline constexpr std::uint8_t kDefaultLedG = 0x00;
-inline constexpr std::uint8_t kDefaultLedB = 0xFF;
-
-// ── DS4 axis ranges (real DualShock 4 / DualSense uses 0–255 for everything) ─
-inline constexpr int kDS4StickMin   = 0;
-inline constexpr int kDS4StickMax   = 255;
-inline constexpr int kDS4TriggerMin = 0;
-inline constexpr int kDS4TriggerMax = 255;
 
 // ── Virtual DS4 touchpad (DS4 pad is 1920x942, from hid-sony / hid-playstation) ─
 inline constexpr int kDS4TouchpadMaxX = 1919;

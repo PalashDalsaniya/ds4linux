@@ -81,7 +81,6 @@ struct ControllerSlot {
     Profile     profile;
     std::string controller_key;      // stable ID for profile assignment (MAC / sysfs path)
     std::string evdev_path;          // gamepad event node path
-    std::string physical_id;         // sysfs path of the parent HID/USB device
     std::string touchpad_path;       // touchpad event node path (if found)
     std::string motion_path;         // motion event node path (if found)
 };
@@ -97,6 +96,9 @@ struct DeviceInfo {
 /// Manages discovery, hotplug, and the translate loop for all controllers.
 class DeviceManager {
 public:
+    /// The part of a controller an evdev node belongs to.
+    enum class NodeType { Gamepad, Touchpad, Motion, Other };
+
     /// Looks up the profile for a newly opened controller (by controller key).
     using ProfileResolver = std::function<Profile(const std::string& controller_key)>;
 
@@ -163,6 +165,17 @@ private:
     void detach_motion(ControllerSlot& slot);
     bool open_slot(const std::string& evdev_path, const std::string& physical_id);
     void close_slot(const std::string& evdev_path);
+    /// A supported controller node found while scanning.
+    struct Node {
+        std::string path;
+        std::string physical_id;  // sysfs path of the parent HID / USB device
+        std::string name;
+        NodeType    type = NodeType::Other;
+        bool        generic = false;
+    };
+    /// Open and inspect one evdev node; nullopt unless it is a supported
+    /// controller's gamepad / touchpad / motion node (never our own).
+    [[nodiscard]] std::optional<Node> probe_node(const std::string& path) const;
     [[nodiscard]] bool is_open_node(const std::string& evdev_path) const;
     [[nodiscard]] bool generic_allowed(std::uint16_t vid, std::uint16_t pid) const;
     [[nodiscard]] std::array<std::uint8_t, 6>

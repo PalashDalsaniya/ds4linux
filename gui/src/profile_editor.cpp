@@ -41,16 +41,6 @@ static_assert(std::size(kButtonLabels) == kDS4ButtonCount);
 
 const QString kDefaultName = toQString(kDefaultProfile);
 
-// Profiles cross the IPC boundary as JSON objects; convert with the shared
-// (validating) serialiser so the GUI never hand-maintains the schema.
-Profile fromJson(const QJsonObject& o) {
-    return profile_from_json(QJsonDocument(o).toJson(QJsonDocument::Compact).toStdString());
-}
-
-QJsonObject toJson(const Profile& p) {
-    return QJsonDocument::fromJson(QByteArray::fromStdString(profile_to_json(p))).object();
-}
-
 } // namespace
 
 ProfileEditor::ProfileEditor(IpcClient* ipc, QWidget* parent)
@@ -173,15 +163,11 @@ ProfileEditor::ProfileEditor(IpcClient* ipc, QWidget* parent)
     // ── Signals ──────────────────────────────────────────────────────────────
     connect(list_, &QListWidget::currentTextChanged, this, [this](const QString& name) {
         if (name.isEmpty() || name == current_) return;
-        if (dirty_) {
-            const auto answer = QMessageBox::question(
-                this, "DS4Linux", QString("Discard unsaved changes to \"%1\"?").arg(current_));
-            if (answer != QMessageBox::Yes) {
-                QSignalBlocker block(list_);
-                const auto items = list_->findItems(current_, Qt::MatchExactly);
-                if (!items.isEmpty()) list_->setCurrentItem(items.first());
-                return;
-            }
+        if (!confirmDiscard()) {
+            QSignalBlocker block(list_);
+            const auto items = list_->findItems(current_, Qt::MatchExactly);
+            if (!items.isEmpty()) list_->setCurrentItem(items.first());
+            return;
         }
         loadProfile(name);
     });
@@ -230,15 +216,9 @@ void ProfileEditor::setDeadzone(const DeadzoneControls& c, const DeadzoneParams&
 }
 
 DeadzoneParams ProfileEditor::getDeadzone(const DeadzoneControls& c) const {
-    DeadzoneParams dz;
-    dz.inner = c.inner->value() / 100.0;
-    dz.outer = c.outer->value() / 100.0;  // validated / fixed up by the daemon
-    if (c.type) {
-        dz.type = static_cast<DeadzoneType>(c.type->currentData().toInt());
-    } else {
-        // Triggers have no type control: off unless a range is set
-        dz.type = dz.inner > 0 || dz.outer < 1 ? DeadzoneType::Circular : DeadzoneType::None;
-    }
+    // Validated / fixed up by the daemon.  Triggers have no type control.
+    DeadzoneParams dz = trigger_deadzone(c.inner->value() / 100.0, c.outer->value() / 100.0);
+    if (c.type) dz.type = static_cast<DeadzoneType>(c.type->currentData().toInt());
     return dz;
 }
 
@@ -264,7 +244,7 @@ void ProfileEditor::loadProfile(const QString& name) {
     if (name.isEmpty()) return;
     ipc_->request("LoadProfile", {{"name", name}}, [this](const QJsonObject& r) {
         if (showIpcError(this, r)) return;
-        showProfile(fromJson(r.value("profile").toObject()));
+        showProfile(profileFromJson(r.value("profile").toObject()));
     });
 }
 
@@ -317,7 +297,7 @@ Profile ProfileEditor::collect() const {
 }
 
 void ProfileEditor::saveProfile(const Profile& p, const std::function<void()>& onSaved) {
-    ipc_->request("SaveProfile", {{"profile", toJson(p)}}, [this, onSaved](const QJsonObject& r) {
+    ipc_->request("SaveProfile", {{"profile", profileToJson(p)}}, [this, onSaved](const QJsonObject& r) {
         if (showIpcError(this, r)) return;
         onSaved();
     });
@@ -328,7 +308,16 @@ void ProfileEditor::save() {
     saveProfile(collect(), [this]() { setDirty(false); });
 }
 
+bool ProfileEditor::confirmDiscard(const QString& note) {
+    if (!dirty_) return true;
+    QString text = QString("Discard unsaved changes to \"%1\"?").arg(current_);
+    if (!note.isEmpty()) text += "\n" + note;
+    return QMessageBox::question(this, "DS4Linux", text) == QMessageBox::Yes;
+}
+
 void ProfileEditor::createProfile(bool copyCurrent) {
+    // The new profile replaces the one being edited in the editor
+    if (!confirmDiscard(copyCurrent ? "The copy will include them." : QString())) return;
     bool ok = false;
     const QString name = QInputDialog::getText(
         this, copyCurrent ? "Duplicate profile" : "New profile", "Profile name:",
@@ -357,7 +346,7 @@ void ProfileEditor::createProfile(bool copyCurrent) {
     } else {
         ipc_->request("LoadProfile", {{"name", kDefaultName}}, [this, saveAs](const QJsonObject& r) {
             if (showIpcError(this, r)) return;
-            saveAs(fromJson(r.value("profile").toObject()));
+            saveAs(profileFromJson(r.value("profile").toObject()));
         });
     }
 }
