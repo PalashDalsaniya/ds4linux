@@ -1,8 +1,8 @@
 [Unit]
 Description=DS4Linux — Sony Controller Bridge Daemon
 Documentation=https://github.com/PalashDalsaniya/ds4linux
-After=systemd-udevd.service modprobe@uhid.service
-Wants=modprobe@uhid.service
+After=systemd-udevd.service modprobe@uhid.service modprobe@uinput.service
+Wants=modprobe@uhid.service modprobe@uinput.service
 
 [Service]
 Type=simple
@@ -19,13 +19,18 @@ PrivateTmp=yes
 NoNewPrivileges=no
 ReadWritePaths=/run
 
-# The daemon needs the evdev and hidraw nodes plus /dev/uhid.  Device globs
-# are not supported here, so allow the whole input and hidraw device classes.
+# Profiles and per-controller profile assignments (/var/lib/ds4linux)
+StateDirectory=ds4linux
+
+# The daemon needs the evdev and hidraw nodes, /dev/uhid (virtual DS4) and
+# /dev/uinput (virtual Xbox 360).  Device globs are not supported here, so
+# allow the whole input and hidraw device classes.
 DeviceAllow=char-input  rw
 DeviceAllow=char-hidraw rw
 DeviceAllow=/dev/uhid   rw
+DeviceAllow=/dev/uinput rw
 
-# Run as root (needed for EVIOCGRAB + uhid)
+# Run as root (needed for EVIOCGRAB, uhid and uinput)
 User=root
 Group=root
 

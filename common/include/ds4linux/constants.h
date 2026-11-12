@@ -27,14 +27,15 @@ inline constexpr std::string_view kVirtualDS4Name        = "DS4Linux Virtual DS4
 // hardware, but unique so the scanner can recognise and skip its own devices.
 inline constexpr std::string_view kVirtualDS4Phys        = "usb-ds4linux-virtual/input0";
 
-// ── Profile paths ────────────────────────────────────────────────────────────
-inline constexpr std::string_view kConfigDirName     = "ds4linux";
+// ── Daemon state (profiles, per-controller profile assignments) ─────────────
+inline constexpr std::string_view kStateDir          = "/var/lib/ds4linux";
 inline constexpr std::string_view kProfilesDirName   = "profiles";
-inline constexpr std::string_view kDefaultProfileName = "default.json";
+inline constexpr std::string_view kAssignmentsFile   = "assignments.json";
+inline constexpr std::string_view kDefaultProfile    = "Default";
 
 // ── Polling ──────────────────────────────────────────────────────────────────
 inline constexpr int kEpollMaxEvents = 16;
-inline constexpr int kEpollTimeoutMs = -1; // block until event
+inline constexpr int kEpollTimeoutMs = 200; // also bounds timer latency
 
 // ── Lightbar defaults ────────────────────────────────────────────────────────
 inline constexpr std::uint8_t kDefaultLedR = 0x00;

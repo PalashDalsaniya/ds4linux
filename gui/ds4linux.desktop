@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=DS4Linux
+GenericName=Controller Settings
+Comment=Configure and test controllers handled by the ds4linux daemon
+Exec=ds4linux-gui
+Icon=input-gaming
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=controller;gamepad;dualshock;dualsense;ds4;

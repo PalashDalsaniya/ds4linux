@@ -32,9 +32,11 @@ sudo cp "$PROJECT_DIR/config/99-ds4linux.rules" /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
-# Ensure the uhid module is loaded now and on boot
+# Ensure the uhid (virtual DS4) and uinput (virtual Xbox 360) modules are
+# loaded now and on boot
 sudo modprobe uhid || true
-echo "uhid" | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
+sudo modprobe uinput || true
+printf 'uhid\nuinput\n' | sudo tee /etc/modules-load.d/ds4linux.conf > /dev/null
 
 echo ""
 echo "=== Installation complete ==="
@@ -43,5 +45,6 @@ echo "Usage:"
 echo "  1. Connect your DualShock 4 / DualSense controller (USB or Bluetooth)."
 echo "  2. Run the daemon:"
 echo "       sudo ds4linux-daemon"
+echo "     Control it with ds4linux-ctl (see ds4linux-ctl --help)."
 echo "  3. Open Steam AFTER the daemon is running for best compatibility."
 echo "  4. When done, press Ctrl+C to stop the daemon."

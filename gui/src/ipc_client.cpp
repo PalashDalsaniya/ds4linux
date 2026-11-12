@@ -1,12 +1,11 @@
 // ds4linux GUI — IPC client implementation
 
 #include "ds4linux/ipc_client.h"
-#include "ds4linux/constants.h"
+#include "ds4linux/ipc_protocol.h"
 
 #include <QJsonDocument>
-#include <QJsonObject>
-#include <QDataStream>
-#include <QtEndian>
+
+#include <exception>
 
 namespace ds4linux::gui {
 
@@ -14,15 +13,22 @@ IpcClient::IpcClient(QObject* parent)
     : QObject(parent)
     , socket_(new QLocalSocket(this))
 {
-    connect(socket_, &QLocalSocket::connected,    this, &IpcClient::onConnected);
-    connect(socket_, &QLocalSocket::disconnected, this, &IpcClient::onDisconnected);
-    connect(socket_, &QLocalSocket::readyRead,    this, &IpcClient::onReadyRead);
-    connect(socket_, &QLocalSocket::errorOccurred,this, &IpcClient::onError);
+    connect(socket_, &QLocalSocket::connected, this, &IpcClient::connected);
+    connect(socket_, &QLocalSocket::disconnected, this, [this]() {
+        pending_.clear();
+        recvBuf_.clear();
+        emit disconnected();
+    });
+    connect(socket_, &QLocalSocket::readyRead, this, &IpcClient::onReadyRead);
+    connect(socket_, &QLocalSocket::errorOccurred, this, [this](QLocalSocket::LocalSocketError) {
+        emit errorOccurred(socket_->errorString());
+    });
 }
 
 IpcClient::~IpcClient() = default;
 
 void IpcClient::connectToDaemon(const QString& socketPath) {
+    if (socket_->state() != QLocalSocket::UnconnectedState) socket_->abort();
     socket_->connectToServer(socketPath);
 }
 
@@ -30,65 +36,39 @@ bool IpcClient::isConnected() const {
     return socket_->state() == QLocalSocket::ConnectedState;
 }
 
-void IpcClient::send(const QString& jsonPayload) {
+void IpcClient::request(const QString& type, const QJsonObject& extra, Reply onReply) {
     if (!isConnected()) return;
 
-    QByteArray payload = jsonPayload.toUtf8();
-    quint32 len = qToBigEndian(static_cast<quint32>(payload.size()));
-
-    QByteArray frame;
-    frame.append(reinterpret_cast<const char*>(&len), sizeof(len));
-    frame.append(payload);
-
-    socket_->write(frame);
-    socket_->flush();
-}
-
-void IpcClient::sendCommand(const QString& type, const QJsonObject& extra) {
     QJsonObject msg = extra;
     msg["type"] = type;
-    send(QString::fromUtf8(QJsonDocument(msg).toJson(QJsonDocument::Compact)));
-}
+    const int id = nextId_++;
+    msg["id"] = id;
+    if (onReply) pending_.insert(id, std::move(onReply));
 
-// ── Slots ────────────────────────────────────────────────────────────────────
-
-void IpcClient::onConnected() {
-    emit connected();
-}
-
-void IpcClient::onDisconnected() {
-    emit disconnected();
-}
-
-void IpcClient::onError(QLocalSocket::LocalSocketError /*err*/) {
-    emit errorOccurred(socket_->errorString());
+    const QByteArray payload = QJsonDocument(msg).toJson(QJsonDocument::Compact);
+    const auto frame = ipc::encode_message(payload.toStdString());
+    socket_->write(reinterpret_cast<const char*>(frame.data()),
+                   static_cast<qint64>(frame.size()));
 }
 
 void IpcClient::onReadyRead() {
-    recvBuf_.append(socket_->readAll());
+    const QByteArray data = socket_->readAll();
+    recvBuf_.insert(recvBuf_.end(), data.begin(), data.end());
 
-    // Decode length-prefixed frames
-    while (recvBuf_.size() >= static_cast<qsizetype>(sizeof(quint32))) {
-        quint32 netLen = 0;
-        std::memcpy(&netLen, recvBuf_.constData(), sizeof(netLen));
-        quint32 payloadLen = qFromBigEndian(netLen);
-
-        if (payloadLen > kIpcMaxMessageBytes) {
-            recvBuf_.clear();
-            emit errorOccurred("IPC frame too large");
-            return;
+    try {
+        while (auto payload = ipc::decode_message(recvBuf_)) {
+            const QJsonObject obj = QJsonDocument::fromJson(
+                QByteArray::fromStdString(*payload)).object();
+            const int id = obj.value("id").toInt(0);
+            if (auto it = pending_.find(id); it != pending_.end()) {
+                Reply cb = std::move(it.value());
+                pending_.erase(it);
+                cb(obj);
+            }
         }
-
-        auto totalFrame = static_cast<qsizetype>(sizeof(quint32) + payloadLen);
-        if (recvBuf_.size() < totalFrame) break; // incomplete
-
-        QString payload = QString::fromUtf8(
-            recvBuf_.constData() + sizeof(quint32),
-            static_cast<qsizetype>(payloadLen)
-        );
-
-        recvBuf_.remove(0, static_cast<int>(totalFrame));
-        emit messageReceived(payload);
+    } catch (const std::exception& ex) {  // oversized / corrupt frame
+        emit errorOccurred(QString::fromUtf8(ex.what()));
+        socket_->abort();
     }
 }
 
