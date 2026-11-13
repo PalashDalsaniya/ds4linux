@@ -105,8 +105,6 @@ public:
 
     VirtualDevice(const VirtualDevice&) = delete;
     VirtualDevice& operator=(const VirtualDevice&) = delete;
-    VirtualDevice(VirtualDevice&&) noexcept;
-    VirtualDevice& operator=(VirtualDevice&&) noexcept;
 
     /// Pack the DS4 input state into an HID report and dispatch via UHID.
     void send_report(const DS4InputState& state) override;

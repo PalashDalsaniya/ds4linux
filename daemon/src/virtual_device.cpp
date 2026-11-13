@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cerrno>
 #include <chrono>
@@ -119,8 +120,8 @@ static void put_le16(std::uint8_t* buf, std::size_t off, std::int16_t v) {
 // accel at 8192 raw units per g, so each 16-bit raw value maps cleanly back
 // to the kernel's normalised units.
 
-static void build_calibration_report(std::uint8_t* buf, std::size_t size) {
-    std::memset(buf, 0, size);
+/// Fill a zeroed 37-byte buffer with the calibration report.
+static void build_calibration_report(std::uint8_t* buf) {
     buf[0] = 0x02; // report ID
 
     // Offsets within the 37-byte report (after report ID byte):
@@ -183,6 +184,7 @@ static std::uint8_t encode_battery(const BatteryInfo& b) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct VirtualDevice::Impl {
+    struct uhid_event input_ev{};   // reused for every input report (main thread)
     int fd = -1;
     int output_event_fd = -1;       // signalled when `pending` has output
     std::uint8_t counter = 0;       // 6-bit frame counter
@@ -268,9 +270,7 @@ VirtualDevice::VirtualDevice(const std::array<std::uint8_t, 6>& mac)
     // The kernel probe runs asynchronously, meaning the driver may request the
     // MAC address (0x81 / 0x12) after this constructor returns, and feature
     // requests block the requester until answered.  A dedicated thread
-    // answers them and collects rumble/LED output for the main loop.  It
-    // captures the heap-allocated Impl (not `this`) so moving the
-    // VirtualDevice cannot leave it with a dangling pointer.
+    // answers them and collects rumble/LED output for the main loop.
     impl_->running.store(true, std::memory_order_relaxed);
     impl_->io_thread = std::thread([impl = impl_.get()]() {
         struct pollfd pfd{};
@@ -299,8 +299,6 @@ VirtualDevice::VirtualDevice(const std::array<std::uint8_t, 6>& mac)
 }
 
 VirtualDevice::~VirtualDevice() = default;
-VirtualDevice::VirtualDevice(VirtualDevice&&) noexcept = default;
-VirtualDevice& VirtualDevice::operator=(VirtualDevice&&) noexcept = default;
 
 int VirtualDevice::output_fd() const noexcept { return impl_->output_event_fd; }
 
@@ -346,7 +344,10 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     //  Byte  34: Touch packet timestamp
     //  Bytes 35–38: Touch point 0, Bytes 39–42: Touch point 1
 
-    std::uint8_t report[kDS4ReportSize]{};
+    // Packed straight into the reusable UHID_INPUT2 event, and only its
+    // header + report are written (the kernel zero-fills the rest)
+    std::uint8_t* report = impl_->input_ev.u.input2.data;
+    std::memset(report, 0, kDS4ReportSize);
 
     report[0] = 0x01;                       // Report ID
 
@@ -415,12 +416,11 @@ void VirtualDevice::send_report(const DS4InputState& s) {
     }
 
     // ── Dispatch via UHID_INPUT2 ─────────────────────────────────────────────
-    struct uhid_event ev{};
+    auto& ev = impl_->input_ev;
     ev.type = UHID_INPUT2;
     ev.u.input2.size = kDS4ReportSize;
-    std::memcpy(ev.u.input2.data, report, kDS4ReportSize);
-
-    [[maybe_unused]] auto rc = ::write(impl_->fd, &ev, sizeof(ev));
+    [[maybe_unused]] auto rc =
+        ::write(impl_->fd, &ev, offsetof(uhid_event, u.input2.data) + kDS4ReportSize);
 }
 
 // ── DS4 output report (rumble + lightbar) from an application ────────────────
@@ -516,7 +516,7 @@ void VirtualDevice::Impl::handle_events() {
             case 0x02: {
                 // Calibration data (37 bytes)
                 std::uint8_t cal[37]{};
-                build_calibration_report(cal, sizeof(cal));
+                build_calibration_report(cal);
                 reply.u.get_report_reply.size = sizeof(cal);
                 std::memcpy(reply.u.get_report_reply.data, cal, sizeof(cal));
                 break;
@@ -554,9 +554,7 @@ void VirtualDevice::Impl::handle_events() {
                 break;
             }
             default: {
-                // Unknown report — return a minimal zeroed response with the ID.
-                // Determine expected size from the descriptor's report count.
-                // Fallback: 64 bytes (max common report size).
+                // Unknown report: answer 64 zero bytes after the ID.
                 std::uint8_t buf[64]{};
                 buf[0] = rnum;
                 reply.u.get_report_reply.size = sizeof(buf);

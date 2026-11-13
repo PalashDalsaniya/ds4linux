@@ -88,7 +88,8 @@ static LightbarColor lightbar_from_json(const json& j) {
     auto channel = [&](const char* k, double def) {
         return static_cast<std::uint8_t>(std::lround(get_number(j, k, def, 0, 255)));
     };
-    return { channel("r", 0), channel("g", 0), channel("b", 255) };
+    const LightbarColor def;
+    return { channel("r", def.r), channel("g", def.g), channel("b", def.b) };
 }
 
 static json deadzone_to_json(const DeadzoneParams& dz) {
@@ -160,10 +161,10 @@ Profile profile_from_json(const std::string& raw) {
     Profile p;
     p.name = j.contains("name") && j["name"].is_string() ? j["name"].get<std::string>() : "";
     p.output_mode = static_cast<OutputMode>(
-        static_cast<int>(get_number(j, "output_mode", 0, 0, 1)));
+        static_cast<int>(get_number(j, "output_mode", static_cast<int>(def.output_mode), 0, 1)));
     if (j.contains("lightbar_color"))
         p.lightbar_color  = lightbar_from_json(j["lightbar_color"]);
-    p.rumble_strength     = get_number(j, "rumble_strength", 1.0, 0.0, 1.0);
+    p.rumble_strength     = get_number(j, "rumble_strength", def.rumble_strength, 0.0, 1.0);
     if (j.contains("left_stick_dz"))
         p.left_stick_dz   = deadzone_from_json(j["left_stick_dz"], def.left_stick_dz);
     if (j.contains("right_stick_dz"))

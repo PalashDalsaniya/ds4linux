@@ -154,13 +154,14 @@ public:
     /// removed), so the caller can rebuild its epoll set.
     [[nodiscard]] bool take_fds_changed() noexcept;
 
-    /// Access all active slots (for status queries).
-    [[nodiscard]] const auto& slots() const noexcept { return slots_; }
+    [[nodiscard]] bool has_controllers() const noexcept { return !slots_.empty(); }
 
 private:
     void emit(ControllerSlot& slot);
     void apply_rumble(ControllerSlot& slot, std::chrono::steady_clock::time_point now);
     void create_output(ControllerSlot& slot, OutputMode mode);
+    void use_profile(ControllerSlot& slot, const Profile& p);
+    [[nodiscard]] ControllerSlot* find_slot(const std::string& evdev_path);
     void detach_touchpad(ControllerSlot& slot);
     void detach_motion(ControllerSlot& slot);
     bool open_slot(const std::string& evdev_path, const std::string& physical_id);

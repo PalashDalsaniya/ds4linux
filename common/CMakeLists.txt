@@ -1,6 +1,7 @@
 # common/ — shared library used by both daemon and GUI
 
 add_library(ds4linux_common STATIC
+    src/file_util.cpp
     src/ipc_protocol.cpp
     src/profile.cpp
 )

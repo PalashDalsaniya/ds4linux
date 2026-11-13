@@ -249,7 +249,7 @@ int main(int argc, char** argv) {
     });
     devmgr.scan();
 
-    if (devmgr.slots().empty()) {
+    if (!devmgr.has_controllers()) {
         std::cerr << "[ds4linux] No controllers found yet — waiting for one "
                      "to be connected.\n";
     }

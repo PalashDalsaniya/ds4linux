@@ -48,7 +48,7 @@ public:
     [[nodiscard]] bool is_client(int fd) const;
 
     /// Connected client fds (for epoll registration).
-    [[nodiscard]] const std::vector<int>& clients() const noexcept;
+    [[nodiscard]] std::vector<int> clients() const;
 
 private:
     struct Impl;

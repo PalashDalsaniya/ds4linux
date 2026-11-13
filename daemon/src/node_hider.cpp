@@ -1,6 +1,7 @@
 // ds4linux::daemon — NodeHider
 
 #include "ds4linux/node_hider.h"
+#include "ds4linux/file_util.h"
 
 #include <cerrno>
 #include <cstring>
@@ -58,22 +59,18 @@ static void write_rules() {
         fs::remove(kRulesFile, ec);
     } else {
         fs::create_directories(kRulesDir, ec);
-        const std::string tmp = std::string(kRulesFile) + ".tmp";
-        {
-            std::ofstream out(tmp, std::ios::trunc);
-            out << "# Written by ds4linux-daemon: controllers it is using right now.\n"
-                   "# Removed when it releases them (or stops).\n";
-            for (const auto& [sysfs, n] : devices) {
-                // hide() only accepts paths without glob / list characters
-                // DEVPATH is the sysfs path without the "/sys" prefix
-                out << "SUBSYSTEM==\"input|hidraw\", DEVPATH==\"" << sysfs.substr(4)
-                    << "/*\", MODE:=\"0600\", TAG-=\"uaccess\"\n";
-            }
+        std::string rules = "# Written by ds4linux-daemon: controllers it is using right now.\n"
+                            "# Removed when it releases them (or stops).\n";
+        for (const auto& [sysfs, n] : devices) {
+            // hide() only accepts paths without glob / list characters;
+            // DEVPATH is the sysfs path without the "/sys" prefix
+            rules += "SUBSYSTEM==\"input|hidraw\", DEVPATH==\"" + sysfs.substr(4) +
+                     "/*\", MODE:=\"0600\", TAG-=\"uaccess\"\n";
         }
-        fs::rename(tmp, kRulesFile, ec);
-        if (ec) {
-            std::cerr << "[ds4linux] Could not write " << kRulesFile << ": "
-                      << ec.message() << "\n";
+        try {
+            write_file_atomic(kRulesFile, rules);
+        } catch (const std::exception& ex) {
+            std::cerr << "[ds4linux] " << ex.what() << "\n";
         }
     }
     // Bounded: this runs on the event loop, and a busy udevd must not
