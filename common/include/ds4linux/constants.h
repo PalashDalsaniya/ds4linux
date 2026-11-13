@@ -8,7 +8,11 @@
 namespace ds4linux {
 
 // ── Version ──────────────────────────────────────────────────────────────────
-inline constexpr std::string_view kVersion = "0.1.1";
+// Set by CMake from project(VERSION ...), the single source of the version
+#ifndef DS4LINUX_VERSION
+#error "DS4LINUX_VERSION must be defined by the build (see common/CMakeLists.txt)"
+#endif
+inline constexpr std::string_view kVersion = DS4LINUX_VERSION;
 
 // ── IPC ──────────────────────────────────────────────────────────────────────
 inline constexpr std::string_view kSocketPath = "/run/ds4linux.sock";

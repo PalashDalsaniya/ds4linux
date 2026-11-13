@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 project(ds4linux
-    VERSION 0.1.1
+    VERSION 1.0.0
     DESCRIPTION "DS4Windows clone for Linux — Sony controller bridge + profile manager"
     LANGUAGES CXX
 )
