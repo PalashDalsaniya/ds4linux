@@ -18,5 +18,8 @@ target_link_libraries(ds4linux_common PUBLIC
 
 target_compile_features(ds4linux_common PUBLIC cxx_std_20)
 
+# The version shown by the daemon, CLI and GUI (kVersion in constants.h)
+target_compile_definitions(ds4linux_common PUBLIC DS4LINUX_VERSION="${PROJECT_VERSION}")
+
 # Alias so consumers can use ds4linux::common
 add_library(ds4linux::common ALIAS ds4linux_common)
