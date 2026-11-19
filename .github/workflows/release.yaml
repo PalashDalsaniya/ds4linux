@@ -1,15 +1,25 @@
 name: Build and Release Packages
 
-# This workflow triggers automatically whenever you push a version tag (e.g., v0.1.0)
+# Pushing a version tag (e.g. v0.1.0) builds the packages and publishes a
+# release. A pull request that changes this workflow builds and checks the
+# packages without publishing, so a fix here can be verified before tagging.
 on:
   push:
     tags:
       - 'v*.*.*'
+  pull_request:
+    paths:
+      - '.github/workflows/release.yaml'
 
 jobs:
   build-release:
     name: Generate DEB and RPM
-    runs-on: ubuntu-latest
+    # Pinned on purpose. ubuntu-latest moved to 26.04, whose amd64v3 glibc
+    # startup files (Scrt1.o) mark every linked program as needing x86-64-v3,
+    # so 1.0.0 wouldn't start on older CPUs ("CPU ISA level is lower than
+    # required", issue #18). 24.04 also keeps the glibc/libstdc++ requirement
+    # low enough for Mint 22 / Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # Required to allow the GitHub bot to create the Release
 
@@ -24,17 +34,44 @@ jobs:
           sudo apt-get install -y cmake ninja-build build-essential libevdev-dev libudev-dev nlohmann-json3-dev rpm
 
       - name: Configure CMake
-        # We inject your new ENABLE_PACKAGING flag here
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDS4LINUX_ENABLE_PACKAGING=ON
+        # -march=x86-64 keeps our own code on the baseline ISA whatever the
+        # compiler defaults to. It can't change the runner's glibc startup
+        # files; that's what the pinned image and the check below are for.
+        run: >
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDS4LINUX_ENABLE_PACKAGING=ON
+          -DCMAKE_CXX_FLAGS="-march=x86-64 -mtune=generic"
 
       - name: Build ds4linux
         run: cmake --build build -j$(nproc)
+
+      - name: Check binaries run on any x86-64 CPU
+        run: |
+          status=0
+          for bin in build/daemon/ds4linux-daemon build/cli/ds4linux-ctl; do
+            needed=$(readelf -n "$bin" | grep 'x86 ISA needed' || true)
+            echo "$bin: ${needed:-no ISA note}"
+            if grep -qE 'x86-64-v[2-4]' <<<"$needed"; then
+              echo "::error file=$bin::needs more than baseline x86-64: $needed"
+              status=1
+            fi
+          done
+          exit $status
 
       - name: Generate Packages (CPack)
         working-directory: build
         run: cpack
 
+      - name: Upload packages (pull requests)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            build/*.deb
+            build/*.rpm
+
       - name: Publish to GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           # Automatically grabs the generated .deb and .rpm files and attaches them
